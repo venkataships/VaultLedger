@@ -1,0 +1,20 @@
+# Dependencies
+node_modules
+.pnp
+.pnp.js
+
+# Production build
+dist
+dist-ssr
+
+# Local env files (never commit secrets; configure VITE_* in GitHub Actions Variables/Secrets)
+.env
+.env.local
+.env.*.local
+
+# Editor & OS
+.DS_Store
+*.log
+.vscode/*
+!.vscode/extensions.json
+.idea
