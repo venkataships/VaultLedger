@@ -303,7 +303,7 @@ export default function AuthVaultGate({ children }) {
               <ShieldCheck className="h-5 w-5" />
             </div>
             <div>
-              <div className="text-sm font-semibold tracking-tight text-zinc-100">VaultLedger</div>
+              <div className="text-sm font-semibold tracking-tight text-zinc-100">asfinance</div>
               <div className="text-[11px] text-zinc-500">Single-Owner Personal Finance</div>
             </div>
           </div>

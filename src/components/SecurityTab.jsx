@@ -60,7 +60,7 @@ export default function SecurityTab({
 
       const { data, error } = await supabase.auth.mfa.enroll({
         factorType: 'totp',
-        friendlyName: `VaultLedger Authenticator (${todayIsoDate()})`,
+        friendlyName: `asfinance Authenticator (${todayIsoDate()})`,
       });
       if (error) throw error;
       setPendingFactor(data);
@@ -172,7 +172,7 @@ export default function SecurityTab({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `vaultledger-backup-${todayIsoDate()}.json`;
+    a.download = `asfinance-backup-${todayIsoDate()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };

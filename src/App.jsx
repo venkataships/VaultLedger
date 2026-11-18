@@ -422,7 +422,7 @@ function AuthenticatedVault({
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-sm font-semibold tracking-tight text-zinc-100">
-                    VaultLedger
+                    asfinance
                   </span>
                   <span
                     className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium uppercase ${
