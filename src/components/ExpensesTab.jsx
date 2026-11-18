@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   BarChart,
   Bar,
@@ -28,7 +28,9 @@ import {
   formatCurrency,
   formatMonthLabel,
   formatPercent,
+  getOwnerDisplayName,
   ordinalDay,
+  OWNER_PROFILES,
   shiftMonthKey,
   todayIsoDate,
   toNumber,
@@ -40,6 +42,8 @@ export default function ExpensesTab({
   expenses,
   recurringBills,
   budgets,
+  householdScope,
+  householdNames,
   privacyMode,
   onDataChanged,
 }) {
@@ -47,8 +51,13 @@ export default function ExpensesTab({
   const [searchQuery, setSearchQuery] = useState('');
   const [catFilter, setCatFilter] = useState('all');
 
+  const defaultOwner = ['primary', 'spouse', 'joint'].includes(householdScope)
+    ? householdScope
+    : 'primary';
+
   // Quick-add expense form
   const [expDate, setExpDate] = useState(todayIsoDate());
+  const [expOwner, setExpOwner] = useState(defaultOwner);
   const [merchant, setMerchant] = useState('');
   const [category, setCategory] = useState('Groceries');
   const [amount, setAmount] = useState('');
@@ -61,6 +70,7 @@ export default function ExpensesTab({
 
   // Recurring Bills modal
   const [billModalOpen, setBillModalOpen] = useState(false);
+  const [billOwner, setBillOwner] = useState(defaultOwner);
   const [billName, setBillName] = useState('');
   const [billCategory, setBillCategory] = useState('Housing');
   const [billAmount, setBillAmount] = useState('');
@@ -70,6 +80,14 @@ export default function ExpensesTab({
   const [billEssential, setBillEssential] = useState(true);
   const [savingBill, setSavingBill] = useState(false);
   const [postingBills, setPostingBills] = useState(false);
+
+  useEffect(() => {
+    const nextOwner = ['primary', 'spouse', 'joint'].includes(householdScope)
+      ? householdScope
+      : 'primary';
+    setExpOwner(nextOwner);
+    setBillOwner(nextOwner);
+  }, [householdScope]);
 
   // Budget & Income modal
   const [budgetModalOpen, setBudgetModalOpen] = useState(false);
@@ -179,6 +197,7 @@ export default function ExpensesTab({
     setAddingExpense(true);
     try {
       const { error } = await supabase.from('expenses').insert({
+        owner_profile: expOwner || 'primary',
         expense_date: expDate,
         merchant: merchant.trim(),
         category,
@@ -209,6 +228,7 @@ export default function ExpensesTab({
     await supabase
       .from('expenses')
       .update({
+        owner_profile: editingExpense.owner_profile || 'primary',
         expense_date: editingExpense.expense_date,
         merchant: editingExpense.merchant.trim(),
         category: editingExpense.category,
@@ -240,6 +260,7 @@ export default function ExpensesTab({
       const rows = metrics.unpostedMonthlyBills.map((b) => {
         const day = Math.min(b.due_day || 1, maxDayInMonth);
         return {
+          owner_profile: b.owner_profile || 'primary',
           expense_date: `${selectedMonth}-${String(day).padStart(2, '0')}`,
           merchant: b.name,
           category: b.category,
@@ -267,6 +288,7 @@ export default function ExpensesTab({
     setSavingBill(true);
     try {
       const { error } = await supabase.from('recurring_bills').insert({
+        owner_profile: billOwner || 'primary',
         name: billName.trim(),
         category: billCategory,
         amount: amt,
@@ -618,7 +640,33 @@ export default function ExpensesTab({
         onSubmit={handleQuickAddExpense}
         className="rounded-xl border border-zinc-800/90 bg-zinc-950/90 p-4"
       >
-        <div className="mb-2.5 text-xs font-semibold text-zinc-300">Quick Log Expense</div>
+        <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-zinc-300">
+          <span>Quick Log Expense</span>
+          <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-[11px] font-medium">
+            {[
+              { key: 'primary', label: householdNames?.primary_name || 'Me' },
+              { key: 'spouse', label: householdNames?.spouse_name || 'Wife' },
+              { key: 'joint', label: 'Joint' },
+            ].map((o) => (
+              <button
+                key={o.key}
+                type="button"
+                onClick={() => setExpOwner(o.key)}
+                className={`rounded-md px-2 py-0.5 transition ${
+                  expOwner === o.key
+                    ? o.key === 'spouse'
+                      ? 'bg-fuchsia-500/20 text-fuchsia-200'
+                      : o.key === 'joint'
+                      ? 'bg-sky-500/20 text-sky-200'
+                      : 'bg-emerald-500/20 text-emerald-200'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                {o.label}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-12">
           <input
             type="date"
@@ -744,6 +792,8 @@ export default function ExpensesTab({
               <tbody className="divide-y divide-zinc-900">
                 {filteredMonthExpenses.map((e) => {
                   const paidAcc = e.payment_account_id ? accountMap.get(e.payment_account_id) : null;
+                  const ownerKey = e.owner_profile || 'primary';
+                  const ownerBadge = OWNER_PROFILES[ownerKey] || OWNER_PROFILES.primary;
                   return (
                     <tr key={e.id} className="hover:bg-zinc-900/40">
                       <td className="whitespace-nowrap py-2.5 pr-3 font-mono text-zinc-400">
@@ -751,8 +801,11 @@ export default function ExpensesTab({
                       </td>
                       <td className="py-2.5 pr-3 font-medium text-zinc-200">
                         {e.merchant}
+                        <span className={`ml-2 rounded border px-1.5 py-0.5 text-[10px] font-normal ${ownerBadge.badgeClass}`}>
+                          {getOwnerDisplayName(ownerKey, householdNames)}
+                        </span>
                         {e.recurring_bill_id && (
-                          <span className="ml-2 rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-normal text-sky-300">
+                          <span className="ml-1.5 rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-normal text-sky-300">
                             Recurring
                           </span>
                         )}
@@ -848,7 +901,21 @@ export default function ExpensesTab({
                   className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-zinc-100"
                 />
               </label>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
+                <label className="block text-zinc-300">
+                  Owner
+                  <select
+                    value={editingExpense.owner_profile || 'primary'}
+                    onChange={(e) =>
+                      setEditingExpense({ ...editingExpense, owner_profile: e.target.value })
+                    }
+                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-zinc-100"
+                  >
+                    <option value="primary">{householdNames?.primary_name || 'Me'}</option>
+                    <option value="spouse">{householdNames?.spouse_name || 'Wife'}</option>
+                    <option value="joint">Joint</option>
+                  </select>
+                </label>
                 <label className="block text-zinc-300">
                   Category
                   <select
@@ -921,6 +988,15 @@ export default function ExpensesTab({
             </div>
 
             <form onSubmit={handleAddRecurringBill} className="mb-5 grid grid-cols-1 gap-2.5 sm:grid-cols-6 text-xs">
+              <select
+                value={billOwner}
+                onChange={(e) => setBillOwner(e.target.value)}
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-zinc-100 sm:col-span-1"
+              >
+                <option value="primary">{householdNames?.primary_name || 'Me'}</option>
+                <option value="spouse">{householdNames?.spouse_name || 'Wife'}</option>
+                <option value="joint">Joint</option>
+              </select>
               <input
                 type="text"
                 required
@@ -961,7 +1037,7 @@ export default function ExpensesTab({
               <select
                 value={billCadence}
                 onChange={(e) => setBillCadence(e.target.value)}
-                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-zinc-100 sm:col-span-2"
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-zinc-100"
               >
                 <option value="monthly">Monthly</option>
                 <option value="quarterly">Quarterly</option>
@@ -1002,10 +1078,18 @@ export default function ExpensesTab({
             </form>
 
             <div className="divide-y divide-zinc-900 rounded-xl border border-zinc-800 px-4">
-              {(recurringBills || []).map((b) => (
+              {(recurringBills || []).map((b) => {
+                const ownerKey = b.owner_profile || 'primary';
+                const ownerBadge = OWNER_PROFILES[ownerKey] || OWNER_PROFILES.primary;
+                return (
                 <div key={b.id} className="flex items-center justify-between py-3 text-xs">
                   <div>
-                    <div className="font-medium text-zinc-200">{b.name}</div>
+                    <div className="flex items-center gap-2 font-medium text-zinc-200">
+                      <span>{b.name}</span>
+                      <span className={`rounded border px-1.5 py-0.5 text-[10px] font-normal ${ownerBadge.badgeClass}`}>
+                        {getOwnerDisplayName(ownerKey, householdNames)}
+                      </span>
+                    </div>
                     <div className="text-[11px] text-zinc-500">
                       {b.category} • {b.cadence} {b.due_day ? `• Due ${ordinalDay(b.due_day)}` : ''}
                     </div>
@@ -1023,7 +1107,8 @@ export default function ExpensesTab({
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
               {(!recurringBills || recurringBills.length === 0) && (
                 <div className="py-8 text-center text-xs text-zinc-500">
                   No recurring bills configured yet.

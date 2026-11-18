@@ -25,6 +25,9 @@ export default function SecurityTab({
   expenses,
   recurringBills,
   budgets,
+  equityHoldings,
+  creditCardPromos,
+  householdNames,
   onDataChanged,
 }) {
   // TOTP Enrollment state
@@ -154,7 +157,10 @@ export default function SecurityTab({
     const payload = {
       exported_at: new Date().toISOString(),
       owner_email: session?.user?.email,
+      household_settings: householdNames,
       accounts,
+      equity_holdings: equityHoldings,
+      credit_card_promos: creditCardPromos,
       balance_snapshots: snapshots,
       recurring_bills: recurringBills,
       expenses,
@@ -174,13 +180,15 @@ export default function SecurityTab({
   const handleClearVaultData = async () => {
     if (
       !window.confirm(
-        'Clear ALL accounts, snapshots, recurring bills, expenses, and budgets from your vault? Your owner login & 2FA remain intact.'
+        'Clear ALL accounts, stock/RSU holdings, balance transfers, snapshots, bills, expenses, and budgets from your vault? Your owner login & 2FA remain intact.'
       )
     ) {
       return;
     }
     await supabase.from('expenses').delete().neq('id', 0);
     await supabase.from('recurring_bills').delete().neq('id', 0);
+    await supabase.from('credit_card_promos').delete().neq('id', 0);
+    await supabase.from('equity_holdings').delete().neq('id', 0);
     await supabase.from('balance_snapshots').delete().neq('id', 0);
     await supabase.from('accounts').delete().neq('id', 0);
     await supabase.from('monthly_budgets').delete().neq('id', 0);

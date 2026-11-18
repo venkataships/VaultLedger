@@ -18,15 +18,23 @@ import {
   AlertTriangle,
   Archive,
   RotateCcw,
+  TrendingUp,
+  CalendarClock,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   ACCOUNT_CATEGORIES,
+  computeAccountEquitySummary,
   computeNetWorthSummary,
+  computePromoStatus,
   estimateLoanPayoff,
   formatCurrency,
   formatPercent,
   formatShortDate,
+  getOwnerDisplayName,
+  HOLDING_TYPES,
   ordinalDay,
+  OWNER_PROFILES,
   todayIsoDate,
   toNumber,
 } from '../lib/finance';
@@ -35,7 +43,7 @@ const FILTER_TABS = [
   { key: 'all', label: 'All Accounts' },
   { key: 'retirement_401k', label: '401(k) & Retirement' },
   { key: 'bank', label: 'Banks & Cash' },
-  { key: 'investment', label: 'Investments' },
+  { key: 'investment', label: 'Investments & RSUs' },
   { key: 'credit_card', label: 'Credit Cards' },
   { key: 'loan', label: 'Active Loans' },
 ];
@@ -44,9 +52,14 @@ export default function AccountsTab({
   supabase,
   accounts,
   snapshots,
+  equityHoldings,
+  promos,
+  householdScope,
+  householdNames,
   initialCategoryFilter = 'all',
   privacyMode,
   onDataChanged,
+  onRefreshQuotes,
   batchModalOpen,
   setBatchModalOpen,
   newAccountCategory,
@@ -61,12 +74,18 @@ export default function AccountsTab({
   const [formError, setFormError] = useState('');
   const [savingForm, setSavingForm] = useState(false);
 
+  const defaultOwnerForScope = ['primary', 'spouse', 'joint'].includes(householdScope)
+    ? householdScope
+    : 'primary';
+
   const [formState, setFormState] = useState({
+    owner_profile: defaultOwnerForScope,
     name: '',
     institution: '',
     category: 'retirement_401k',
     subtype: 'Traditional 401(k)',
     current_balance: '',
+    cash_balance: '0',
     credit_limit: '',
     original_principal: '',
     interest_rate: '',
@@ -75,6 +94,19 @@ export default function AccountsTab({
     contribution_pct: '',
     employer_match_pct: '',
     notes: '',
+    // Optional inline initial RSU/Stock holding on creation
+    add_initial_holding: false,
+    holding_symbol: '',
+    holding_type: 'rsu',
+    holding_shares: '',
+    holding_unvested_shares: '',
+    // Optional inline 0% Balance Transfer Promo on creation
+    add_initial_promo: false,
+    promo_label: '',
+    promo_balance: '',
+    promo_apr: '0',
+    standard_apr: '24.99',
+    promo_expires_on: '',
   });
 
   // History Modal state
@@ -89,6 +121,34 @@ export default function AccountsTab({
   const [batchValues, setBatchValues] = useState({});
   const [batchNote, setBatchNote] = useState('Periodic balance check-in');
   const [savingBatch, setSavingBatch] = useState(false);
+
+  // Stock / RSU Holdings Modal state
+  const [holdingsAccount, setHoldingsAccount] = useState(null);
+  const [holdingCashInput, setHoldingCashInput] = useState('0');
+  const [newSymbol, setNewSymbol] = useState('');
+  const [newHoldingType, setNewHoldingType] = useState('rsu');
+  const [newVestedShares, setNewVestedShares] = useState('');
+  const [newUnvestedShares, setNewUnvestedShares] = useState('');
+  const [newCostBasis, setNewCostBasis] = useState('');
+  const [newHoldingNotes, setNewHoldingNotes] = useState('');
+  const [savingHolding, setSavingHolding] = useState(false);
+  const [holdingError, setHoldingError] = useState('');
+  const [editingHoldingId, setEditingHoldingId] = useState(null);
+  const [editVestedInput, setEditVestedInput] = useState('');
+  const [editUnvestedInput, setEditUnvestedInput] = useState('');
+
+  // Promo Balance Transfer Modal state
+  const [promoAccount, setPromoAccount] = useState(null);
+  const [promoLabel, setPromoLabel] = useState('');
+  const [promoOriginal, setPromoOriginal] = useState('');
+  const [promoBalance, setPromoBalance] = useState('');
+  const [promoApr, setPromoApr] = useState('0');
+  const [promoStdApr, setPromoStdApr] = useState('24.99');
+  const [promoFeePct, setPromoFeePct] = useState('3');
+  const [promoExpiresOn, setPromoExpiresOn] = useState('');
+  const [promoNotes, setPromoNotes] = useState('');
+  const [savingPromo, setSavingPromo] = useState(false);
+  const [promoError, setPromoError] = useState('');
 
   const mask = (str) => (privacyMode ? '••••••' : str);
 
@@ -114,6 +174,40 @@ export default function AccountsTab({
     }
   }, [batchModalOpen, accounts]);
 
+  // Keep modal account references fresh when parent reloads data
+  useEffect(() => {
+    if (holdingsAccount) {
+      const updated = accounts.find((a) => a.id === holdingsAccount.id);
+      if (updated && updated !== holdingsAccount) {
+        setHoldingsAccount(updated);
+        setHoldingCashInput(String(toNumber(updated.cash_balance)));
+      }
+    }
+    if (promoAccount) {
+      const updated = accounts.find((a) => a.id === promoAccount.id);
+      if (updated && updated !== promoAccount) setPromoAccount(updated);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts]);
+
+  const holdingsByAccount = useMemo(() => {
+    const map = new Map();
+    for (const h of equityHoldings || []) {
+      if (!map.has(h.account_id)) map.set(h.account_id, []);
+      map.get(h.account_id).push(h);
+    }
+    return map;
+  }, [equityHoldings]);
+
+  const promosByAccount = useMemo(() => {
+    const map = new Map();
+    for (const p of promos || []) {
+      if (!map.has(p.account_id)) map.set(p.account_id, []);
+      map.get(p.account_id).push(p);
+    }
+    return map;
+  }, [promos]);
+
   const summary = useMemo(() => computeNetWorthSummary(accounts), [accounts]);
 
   const visibleAccounts = useMemo(() => {
@@ -136,11 +230,13 @@ export default function AccountsTab({
     setEditingAccount(null);
     setFormError('');
     setFormState({
+      owner_profile: defaultOwnerForScope,
       name: '',
       institution: '',
       category: cat,
       subtype: ACCOUNT_CATEGORIES[cat].subtypes[0] || '',
       current_balance: '',
+      cash_balance: '0',
       credit_limit: '',
       original_principal: '',
       interest_rate: '',
@@ -149,6 +245,17 @@ export default function AccountsTab({
       contribution_pct: '',
       employer_match_pct: '',
       notes: '',
+      add_initial_holding: false,
+      holding_symbol: '',
+      holding_type: 'rsu',
+      holding_shares: '',
+      holding_unvested_shares: '',
+      add_initial_promo: false,
+      promo_label: '',
+      promo_balance: '',
+      promo_apr: '0',
+      standard_apr: '24.99',
+      promo_expires_on: '',
     });
     setFormModalOpen(true);
   };
@@ -157,11 +264,13 @@ export default function AccountsTab({
     setEditingAccount(acc);
     setFormError('');
     setFormState({
+      owner_profile: acc.owner_profile || 'primary',
       name: acc.name || '',
       institution: acc.institution || '',
       category: acc.category,
       subtype: acc.subtype || '',
       current_balance: String(toNumber(acc.current_balance)),
+      cash_balance: String(toNumber(acc.cash_balance)),
       credit_limit: acc.credit_limit !== null && acc.credit_limit !== undefined ? String(acc.credit_limit) : '',
       original_principal:
         acc.original_principal !== null && acc.original_principal !== undefined
@@ -175,6 +284,17 @@ export default function AccountsTab({
       employer_match_pct:
         acc.metadata?.employer_match_pct !== undefined ? String(acc.metadata.employer_match_pct) : '',
       notes: acc.notes || '',
+      add_initial_holding: false,
+      holding_symbol: '',
+      holding_type: 'rsu',
+      holding_shares: '',
+      holding_unvested_shares: '',
+      add_initial_promo: false,
+      promo_label: '',
+      promo_balance: '',
+      promo_apr: '0',
+      standard_apr: '24.99',
+      promo_expires_on: '',
     });
     setFormModalOpen(true);
   };
@@ -188,6 +308,42 @@ export default function AccountsTab({
     }));
   };
 
+  const recomputeAccountBalanceFromHoldings = async (accountId, overrideCashBalance) => {
+    const [{ data: acc }, { data: rows }] = await Promise.all([
+      supabase.from('accounts').select('*').eq('id', accountId).single(),
+      supabase.from('equity_holdings').select('*').eq('account_id', accountId),
+    ]);
+    if (!acc) return;
+
+    const cashVal =
+      overrideCashBalance !== undefined ? toNumber(overrideCashBalance) : toNumber(acc.cash_balance);
+    const equityVal = (rows || []).reduce(
+      (sum, h) => sum + toNumber(h.shares) * toNumber(h.last_price),
+      0
+    );
+    const nextBalance =
+      (rows || []).length > 0 ? Number((cashVal + equityVal).toFixed(2)) : toNumber(acc.current_balance);
+
+    await supabase
+      .from('accounts')
+      .update({
+        cash_balance: cashVal,
+        current_balance: nextBalance,
+        last_updated_at: new Date().toISOString(),
+      })
+      .eq('id', accountId);
+
+    await supabase.from('balance_snapshots').upsert(
+      {
+        account_id: accountId,
+        snapshot_date: todayIsoDate(),
+        balance: nextBalance,
+        note: 'Stock/RSU holdings updated',
+      },
+      { onConflict: 'account_id,snapshot_date' }
+    );
+  };
+
   const handleSaveAccount = async (e) => {
     e.preventDefault();
     setFormError('');
@@ -197,8 +353,21 @@ export default function AccountsTab({
       const catDef = ACCOUNT_CATEGORIES[formState.category];
       if (!catDef) throw new Error('Invalid account category.');
 
-      const balanceVal = Number(parseFloat(formState.current_balance || '0').toFixed(2));
-      if (!Number.isFinite(balanceVal)) throw new Error('Enter a valid balance amount.');
+      const hasExistingHoldings =
+        editingAccount && (holdingsByAccount.get(editingAccount.id) || []).length > 0;
+
+      let balanceVal = Number(parseFloat(formState.current_balance || '0').toFixed(2));
+      if (!Number.isFinite(balanceVal)) balanceVal = 0;
+
+      const cashVal = Number(parseFloat(formState.cash_balance || '0').toFixed(2)) || 0;
+
+      if (hasExistingHoldings) {
+        const eqSummary = computeAccountEquitySummary(
+          { ...editingAccount, cash_balance: cashVal },
+          holdingsByAccount.get(editingAccount.id)
+        );
+        balanceVal = eqSummary.computedBalance;
+      }
 
       const metadata = {
         ...(editingAccount?.metadata || {}),
@@ -210,12 +379,14 @@ export default function AccountsTab({
       }
 
       const payload = {
+        owner_profile: formState.owner_profile || 'primary',
         name: formState.name.trim(),
         institution: formState.institution.trim(),
         category: formState.category,
         subtype: formState.subtype.trim(),
         is_liability: catDef.isLiability,
         current_balance: balanceVal,
+        cash_balance: catDef.isLiability ? 0 : cashVal,
         credit_limit: formState.credit_limit !== '' ? Number(formState.credit_limit) : null,
         original_principal: formState.original_principal !== '' ? Number(formState.original_principal) : null,
         interest_rate: formState.interest_rate !== '' ? Number(formState.interest_rate) : null,
@@ -246,8 +417,70 @@ export default function AccountsTab({
         savedAccount = data;
       }
 
-      // Automatically record/update today's snapshot so Net Worth history stays synced
-      if (savedAccount) {
+      // Optional initial Stock/RSU ticker when creating a new asset account
+      let addedHolding = false;
+      if (
+        !editingAccount &&
+        savedAccount &&
+        formState.add_initial_holding &&
+        formState.holding_symbol.trim()
+      ) {
+        const sym = formState.holding_symbol.trim().toUpperCase();
+        const vested = Number(parseFloat(formState.holding_shares || '0')) || 0;
+        const unvested = Number(parseFloat(formState.holding_unvested_shares || '0')) || 0;
+
+        let livePrice = 0;
+        let prevClose = null;
+        let fetchedAt = null;
+        const { data: qData } = await supabase.functions.invoke('stock-quotes', {
+          body: { symbols: [sym] },
+        });
+        const q = qData?.quotes?.[sym];
+        if (q && Number(q.price) > 0) {
+          livePrice = Number(q.price);
+          prevClose = Number(q.prevClose) || livePrice;
+          fetchedAt = q.fetchedAt || new Date().toISOString();
+        }
+
+        await supabase.from('equity_holdings').insert({
+          account_id: savedAccount.id,
+          symbol: sym,
+          holding_type: formState.holding_type || 'rsu',
+          shares: vested,
+          unvested_shares: unvested,
+          last_price: livePrice,
+          prev_close: prevClose,
+          last_price_at: fetchedAt,
+          notes: '',
+        });
+
+        await recomputeAccountBalanceFromHoldings(savedAccount.id, cashVal);
+        addedHolding = true;
+      }
+
+      // Optional initial 0% Balance Transfer Promo when creating a credit card
+      if (
+        !editingAccount &&
+        savedAccount &&
+        formState.category === 'credit_card' &&
+        formState.add_initial_promo &&
+        formState.promo_expires_on
+      ) {
+        const pBal = Number(parseFloat(formState.promo_balance || formState.current_balance || '0')) || 0;
+        await supabase.from('credit_card_promos').insert({
+          account_id: savedAccount.id,
+          label: formState.promo_label.trim() || `${savedAccount.name} Promo`,
+          original_amount: pBal,
+          promo_balance: pBal,
+          promo_apr: Number(parseFloat(formState.promo_apr || '0')) || 0,
+          standard_apr: formState.standard_apr ? Number(parseFloat(formState.standard_apr)) : null,
+          expires_on: formState.promo_expires_on,
+          is_paid_off: false,
+          notes: '',
+        });
+      }
+
+      if (savedAccount && !addedHolding) {
         await supabase.from('balance_snapshots').upsert(
           {
             account_id: savedAccount.id,
@@ -353,7 +586,6 @@ export default function AccountsTab({
       );
       if (error) throw error;
 
-      // If snapshot is for today or newer than existing snapshots, also sync current_balance
       const latestDate =
         accountSnapshots.length > 0
           ? accountSnapshots[accountSnapshots.length - 1].snapshot_date
@@ -375,6 +607,202 @@ export default function AccountsTab({
 
   const handleDeleteSnapshot = async (snapId) => {
     await supabase.from('balance_snapshots').delete().eq('id', snapId);
+    await onDataChanged();
+  };
+
+  // --- Stock & RSU Holdings Modal Handlers ---
+  const openHoldingsModal = (acc) => {
+    setHoldingsAccount(acc);
+    setHoldingCashInput(String(toNumber(acc.cash_balance)));
+    setHoldingError('');
+    setNewSymbol('');
+    setNewHoldingType('rsu');
+    setNewVestedShares('');
+    setNewUnvestedShares('');
+    setNewCostBasis('');
+    setNewHoldingNotes('');
+    setEditingHoldingId(null);
+  };
+
+  const handleSaveHoldingCash = async () => {
+    if (!holdingsAccount) return;
+    setSavingHolding(true);
+    setHoldingError('');
+    try {
+      const cashVal = Number(parseFloat(holdingCashInput || '0').toFixed(2)) || 0;
+      await recomputeAccountBalanceFromHoldings(holdingsAccount.id, cashVal);
+      await onDataChanged();
+    } catch (err) {
+      setHoldingError(err?.message || 'Failed to save cash sweep balance.');
+    } finally {
+      setSavingHolding(false);
+    }
+  };
+
+  const handleAddHolding = async (e) => {
+    e.preventDefault();
+    if (!holdingsAccount) return;
+    const sym = newSymbol.trim().toUpperCase();
+    if (!sym) return;
+
+    const vested = Number(parseFloat(newVestedShares || '0')) || 0;
+    const unvested = Number(parseFloat(newUnvestedShares || '0')) || 0;
+    const basis = newCostBasis !== '' ? Number(parseFloat(newCostBasis)) : null;
+
+    setSavingHolding(true);
+    setHoldingError('');
+    try {
+      let livePrice = 0;
+      let prevClose = null;
+      let fetchedAt = null;
+
+      const { data: qData, error: fnErr } = await supabase.functions.invoke('stock-quotes', {
+        body: { symbols: [sym] },
+      });
+      if (!fnErr && qData?.quotes?.[sym]) {
+        const q = qData.quotes[sym];
+        livePrice = Number(q.price) || 0;
+        prevClose = Number(q.prevClose) || livePrice;
+        fetchedAt = q.fetchedAt || new Date().toISOString();
+      }
+
+      const { error: insErr } = await supabase.from('equity_holdings').insert({
+        account_id: holdingsAccount.id,
+        symbol: sym,
+        holding_type: newHoldingType,
+        shares: vested,
+        unvested_shares: unvested,
+        cost_basis_per_share: basis,
+        last_price: livePrice,
+        prev_close: prevClose,
+        last_price_at: fetchedAt,
+        notes: newHoldingNotes.trim(),
+      });
+      if (insErr) throw insErr;
+
+      const cashVal = Number(parseFloat(holdingCashInput || '0').toFixed(2)) || 0;
+      await recomputeAccountBalanceFromHoldings(holdingsAccount.id, cashVal);
+
+      setNewSymbol('');
+      setNewVestedShares('');
+      setNewUnvestedShares('');
+      setNewCostBasis('');
+      setNewHoldingNotes('');
+      await onDataChanged();
+    } catch (err) {
+      setHoldingError(err?.message || 'Could not add holding.');
+    } finally {
+      setSavingHolding(false);
+    }
+  };
+
+  const handleSaveEditedHolding = async (holdingId) => {
+    if (!holdingsAccount) return;
+    setSavingHolding(true);
+    try {
+      await supabase
+        .from('equity_holdings')
+        .update({
+          shares: Math.max(0, Number(parseFloat(editVestedInput || '0')) || 0),
+          unvested_shares: Math.max(0, Number(parseFloat(editUnvestedInput || '0')) || 0),
+        })
+        .eq('id', holdingId);
+      setEditingHoldingId(null);
+      await recomputeAccountBalanceFromHoldings(holdingsAccount.id);
+      await onDataChanged();
+    } finally {
+      setSavingHolding(false);
+    }
+  };
+
+  const handleDeleteHolding = async (holdingId) => {
+    if (!holdingsAccount) return;
+    setSavingHolding(true);
+    try {
+      await supabase.from('equity_holdings').delete().eq('id', holdingId);
+      await recomputeAccountBalanceFromHoldings(holdingsAccount.id);
+      await onDataChanged();
+    } finally {
+      setSavingHolding(false);
+    }
+  };
+
+  // --- Promo Balance Transfer Modal Handlers ---
+  const openPromoModal = (acc) => {
+    setPromoAccount(acc);
+    setPromoLabel('');
+    setPromoOriginal(String(toNumber(acc.current_balance) || ''));
+    setPromoBalance(String(toNumber(acc.current_balance) || ''));
+    setPromoApr('0');
+    setPromoStdApr(acc.interest_rate ? String(acc.interest_rate) : '24.99');
+    setPromoFeePct('3');
+    setPromoExpiresOn('');
+    setPromoNotes('');
+    setPromoError('');
+  };
+
+  const handleAddPromo = async (e) => {
+    e.preventDefault();
+    if (!promoAccount || !promoExpiresOn) return;
+    setSavingPromo(true);
+    setPromoError('');
+    try {
+      const rem = Number(parseFloat(promoBalance || '0').toFixed(2)) || 0;
+      const orig = Number(parseFloat(promoOriginal || promoBalance || '0').toFixed(2)) || rem;
+      const { error } = await supabase.from('credit_card_promos').insert({
+        account_id: promoAccount.id,
+        label: promoLabel.trim() || `${promoAccount.name} Promo BT`,
+        original_amount: orig,
+        promo_balance: rem,
+        promo_apr: Number(parseFloat(promoApr || '0')) || 0,
+        standard_apr: promoStdApr !== '' ? Number(parseFloat(promoStdApr)) : null,
+        transfer_fee_pct: promoFeePct !== '' ? Number(parseFloat(promoFeePct)) : null,
+        expires_on: promoExpiresOn,
+        is_paid_off: rem <= 0,
+        notes: promoNotes.trim(),
+      });
+      if (error) throw error;
+
+      setPromoLabel('');
+      setPromoBalance('');
+      setPromoExpiresOn('');
+      setPromoNotes('');
+      await onDataChanged();
+    } catch (err) {
+      setPromoError(err?.message || 'Could not save balance transfer promo.');
+    } finally {
+      setSavingPromo(false);
+    }
+  };
+
+  const handleUpdatePromoBalance = async (promo) => {
+    const nextStr = window.prompt(
+      `Enter remaining promo balance for "${promo.label}" ($):`,
+      String(toNumber(promo.promo_balance))
+    );
+    if (nextStr === null) return;
+    const nextBal = Math.max(0, Number(parseFloat(nextStr).toFixed(2)) || 0);
+    await supabase
+      .from('credit_card_promos')
+      .update({ promo_balance: nextBal, is_paid_off: nextBal <= 0 })
+      .eq('id', promo.id);
+    await onDataChanged();
+  };
+
+  const handleTogglePromoPaid = async (promo) => {
+    const nextPaid = !promo.is_paid_off;
+    await supabase
+      .from('credit_card_promos')
+      .update({
+        is_paid_off: nextPaid,
+        promo_balance: nextPaid ? 0 : promo.promo_balance,
+      })
+      .eq('id', promo.id);
+    await onDataChanged();
+  };
+
+  const handleDeletePromo = async (promoId) => {
+    await supabase.from('credit_card_promos').delete().eq('id', promoId);
     await onDataChanged();
   };
 
@@ -475,7 +903,7 @@ export default function AccountsTab({
       {/* Accounts Grid */}
       {visibleAccounts.length === 0 ? (
         <div className="rounded-xl border border-dashed border-zinc-800 bg-zinc-950/50 py-14 text-center text-xs text-zinc-500">
-          No accounts in this category yet.
+          No accounts in this view yet.
           <div className="mt-3">
             <button
               type="button"
@@ -490,6 +918,8 @@ export default function AccountsTab({
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {visibleAccounts.map((acc) => {
             const catDef = ACCOUNT_CATEGORIES[acc.category] || ACCOUNT_CATEGORIES.other_asset;
+            const ownerKey = acc.owner_profile || 'primary';
+            const ownerBadge = OWNER_PROFILES[ownerKey] || OWNER_PROFILES.primary;
             const bal = toNumber(acc.current_balance);
             const limit = toNumber(acc.credit_limit);
             const origPrincipal = toNumber(acc.original_principal);
@@ -503,6 +933,12 @@ export default function AccountsTab({
               acc.category === 'loan' && bal > 0 && toNumber(acc.minimum_payment) > 0
                 ? estimateLoanPayoff(bal, acc.interest_rate, acc.minimum_payment)
                 : null;
+
+            const accHoldings = holdingsByAccount.get(acc.id) || [];
+            const eqSummary = computeAccountEquitySummary(acc, accHoldings);
+            const accPromos = (promosByAccount.get(acc.id) || []).filter(
+              (p) => !p.is_paid_off && toNumber(p.promo_balance) > 0
+            );
 
             return (
               <div
@@ -522,6 +958,9 @@ export default function AccountsTab({
                           style={{ backgroundColor: catDef.colorHex }}
                         />
                         <h3 className="text-sm font-semibold text-zinc-100">{acc.name}</h3>
+                        <span className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${ownerBadge.badgeClass}`}>
+                          {getOwnerDisplayName(ownerKey, householdNames)}
+                        </span>
                         {acc.is_archived && (
                           <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">
                             Archived
@@ -543,13 +982,108 @@ export default function AccountsTab({
                         {mask(formatCurrency(bal))}
                       </div>
                       <div className="text-[10px] text-zinc-500">
-                        Updated {acc.last_updated_at ? formatShortDate(acc.last_updated_at.slice(0, 10)) : 'recently'}
+                        {eqSummary.hasHoldings ? (
+                          <span className={eqSummary.dayChangeValue >= 0 ? 'text-emerald-400' : 'text-rose-400'}>
+                            {mask(formatCurrency(eqSummary.dayChangeValue, { showSign: true }))} today
+                          </span>
+                        ) : (
+                          `Updated ${acc.last_updated_at ? formatShortDate(acc.last_updated_at.slice(0, 10)) : 'recently'}`
+                        )}
                       </div>
                     </div>
                   </div>
 
                   {/* Category-specific insight pills & progress bars */}
                   <div className="mt-4 space-y-2.5">
+                    {/* Live Stock / RSU Holdings Breakdown */}
+                    {eqSummary.hasHoldings && (
+                      <div className="space-y-1.5 rounded-lg border border-sky-500/20 bg-sky-500/5 p-3 text-[11px]">
+                        <div className="flex items-center justify-between text-sky-200">
+                          <span className="font-medium">Live Stock & RSU Positions</span>
+                          {eqSummary.cashBalance > 0 && (
+                            <span className="font-mono text-zinc-400">
+                              + {mask(formatCurrency(eqSummary.cashBalance))} cash
+                            </span>
+                          )}
+                        </div>
+                        <div className="divide-y divide-zinc-800/70">
+                          {accHoldings.map((h) => {
+                            const mktVal = toNumber(h.shares) * toNumber(h.last_price);
+                            const unvestedVal = toNumber(h.unvested_shares) * toNumber(h.last_price);
+                            const prev = toNumber(h.prev_close);
+                            const dayPct =
+                              prev > 0 ? ((toNumber(h.last_price) - prev) / prev) * 100 : 0;
+
+                            return (
+                              <div key={h.id} className="flex items-center justify-between py-1.5">
+                                <div>
+                                  <span className="font-mono font-semibold text-zinc-100">{h.symbol}</span>
+                                  <span className="ml-1.5 rounded bg-zinc-800 px-1 py-0.5 text-[9px] uppercase text-zinc-400">
+                                    {HOLDING_TYPES[h.holding_type]?.label || h.holding_type}
+                                  </span>
+                                  <span className="ml-2 text-zinc-400 tabular-nums">
+                                    {toNumber(h.shares).toLocaleString('en-US', { maximumFractionDigits: 4 })} sh @ $
+                                    {toNumber(h.last_price).toFixed(2)}
+                                  </span>
+                                  {toNumber(h.unvested_shares) > 0 && (
+                                    <span className="ml-2 text-zinc-500">
+                                      (+{toNumber(h.unvested_shares)} unvested ≈{' '}
+                                      {mask(formatCurrency(unvestedVal, { decimals: 0 }))})
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="text-right font-mono tabular-nums">
+                                  <div className="font-medium text-zinc-100">
+                                    {mask(formatCurrency(mktVal))}
+                                  </div>
+                                  {prev > 0 && (
+                                    <div className={`text-[10px] ${dayPct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                                      {dayPct >= 0 ? '+' : ''}
+                                      {dayPct.toFixed(2)}%
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Credit Card Balance Transfer Promo Reminders */}
+                    {accPromos.length > 0 && (
+                      <div className="space-y-1.5">
+                        {accPromos.map((p) => {
+                          const st = computePromoStatus(p);
+                          return (
+                            <div
+                              key={p.id}
+                              className={`flex flex-wrap items-center justify-between gap-2 rounded-lg border px-3 py-2 text-[11px] ${
+                                st.urgency === 'expired' || st.urgency === 'urgent'
+                                  ? 'border-rose-500/35 bg-rose-500/10 text-rose-200'
+                                  : 'border-amber-500/30 bg-amber-500/10 text-amber-200'
+                              }`}
+                            >
+                              <div>
+                                <div className="font-medium">
+                                  {p.label} ({formatPercent(p.promo_apr, 1)} promo)
+                                </div>
+                                <div className="text-[10px] opacity-80">
+                                  {mask(formatCurrency(p.promo_balance))} left • Ends {formatShortDate(p.expires_on)} (
+                                  {st.daysLeft < 0 ? `Expired ${Math.abs(st.daysLeft)}d ago` : `${st.daysLeft}d left`})
+                                </div>
+                              </div>
+                              <div className="font-mono font-semibold text-emerald-300">
+                                {st.daysLeft <= 0
+                                  ? 'Pay now'
+                                  : `${mask(formatCurrency(st.requiredMonthlyPayment, { decimals: 0 }))}/mo`}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+
                     {/* Credit Card Utilization */}
                     {utilPct !== null && (
                       <div>
@@ -646,19 +1180,43 @@ export default function AccountsTab({
                 </div>
 
                 {/* Card Footer Actions */}
-                <div className="mt-4 flex items-center justify-between border-t border-zinc-900 pt-3 text-xs">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setHistoryAccount(acc);
-                      setNewSnapDate(todayIsoDate());
-                      setNewSnapBalance(String(toNumber(acc.current_balance)));
-                    }}
-                    className="inline-flex items-center gap-1.5 text-zinc-400 hover:text-emerald-300"
-                  >
-                    <History className="h-3.5 w-3.5" />
-                    Balance History
-                  </button>
+                <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-zinc-900 pt-3 text-xs">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setHistoryAccount(acc);
+                        setNewSnapDate(todayIsoDate());
+                        setNewSnapBalance(String(toNumber(acc.current_balance)));
+                      }}
+                      className="inline-flex items-center gap-1 text-zinc-400 hover:text-emerald-300"
+                    >
+                      <History className="h-3.5 w-3.5" />
+                      History
+                    </button>
+
+                    {(acc.category === 'investment' || acc.category === 'retirement_401k') && (
+                      <button
+                        type="button"
+                        onClick={() => openHoldingsModal(acc)}
+                        className="inline-flex items-center gap-1 text-sky-400 hover:text-sky-300"
+                      >
+                        <TrendingUp className="h-3.5 w-3.5" />
+                        Stocks / RSUs ({accHoldings.length})
+                      </button>
+                    )}
+
+                    {acc.category === 'credit_card' && (
+                      <button
+                        type="button"
+                        onClick={() => openPromoModal(acc)}
+                        className="inline-flex items-center gap-1 text-amber-300 hover:text-amber-200"
+                      >
+                        <CalendarClock className="h-3.5 w-3.5" />
+                        Promo Transfers ({accPromos.length})
+                      </button>
+                    )}
+                  </div>
 
                   <div className="flex items-center gap-2">
                     <button
@@ -731,6 +1289,35 @@ export default function AccountsTab({
             )}
 
             <form onSubmit={handleSaveAccount} className="space-y-4 text-xs">
+              {/* Owner Profile Selector */}
+              <div>
+                <div className="mb-1.5 text-zinc-300">Account Owner</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { key: 'primary', label: householdNames.primary_name },
+                    { key: 'spouse', label: householdNames.spouse_name },
+                    { key: 'joint', label: 'Joint' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      onClick={() => setFormState({ ...formState, owner_profile: opt.key })}
+                      className={`rounded-lg border py-2 font-medium transition ${
+                        formState.owner_profile === opt.key
+                          ? opt.key === 'spouse'
+                            ? 'border-fuchsia-500/60 bg-fuchsia-500/15 text-fuchsia-200'
+                            : opt.key === 'joint'
+                            ? 'border-sky-500/60 bg-sky-500/15 text-sky-200'
+                            : 'border-emerald-500/60 bg-emerald-500/15 text-emerald-200'
+                          : 'border-zinc-800 bg-zinc-900 text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block text-zinc-300">
                   Account Category
@@ -769,7 +1356,7 @@ export default function AccountsTab({
                   <input
                     type="text"
                     required
-                    placeholder="e.g., Fidelity 401(k), Chase Checking"
+                    placeholder="e.g., E*TRADE RSU, Wife Fidelity 401(k)"
                     value={formState.name}
                     onChange={(e) => setFormState({ ...formState, name: e.target.value })}
                     className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
@@ -780,7 +1367,7 @@ export default function AccountsTab({
                   Institution / Issuer
                   <input
                     type="text"
-                    placeholder="e.g., Fidelity, Ally, Chase, Amex"
+                    placeholder="e.g., Fidelity, E*TRADE, Citi, Chase"
                     value={formState.institution}
                     onChange={(e) => setFormState({ ...formState, institution: e.target.value })}
                     className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
@@ -789,20 +1376,36 @@ export default function AccountsTab({
               </div>
 
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <label className="block text-zinc-300">
-                  {ACCOUNT_CATEGORIES[formState.category]?.isLiability
-                    ? 'Current Balance Owed ($) *'
-                    : 'Current Balance ($) *'}
-                  <input
-                    type="number"
-                    step="0.01"
-                    required
-                    placeholder="0.00"
-                    value={formState.current_balance}
-                    onChange={(e) => setFormState({ ...formState, current_balance: e.target.value })}
-                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
-                  />
-                </label>
+                {editingAccount && (holdingsByAccount.get(editingAccount.id) || []).length > 0 ? (
+                  <label className="block text-zinc-300">
+                    Uninvested Cash Sweep ($)
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={formState.cash_balance}
+                      onChange={(e) => setFormState({ ...formState, cash_balance: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100"
+                    />
+                    <span className="mt-1 block text-[10px] text-sky-400">
+                      Total balance auto-calculates from cash + live Stocks/RSUs.
+                    </span>
+                  </label>
+                ) : (
+                  <label className="block text-zinc-300">
+                    {ACCOUNT_CATEGORIES[formState.category]?.isLiability
+                      ? 'Current Balance Owed ($) *'
+                      : 'Current Balance / Cash ($) *'}
+                    <input
+                      type="number"
+                      step="0.01"
+                      required={!formState.add_initial_holding}
+                      placeholder="0.00"
+                      value={formState.current_balance}
+                      onChange={(e) => setFormState({ ...formState, current_balance: e.target.value })}
+                      className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+                    />
+                  </label>
+                )}
 
                 <label className="block text-zinc-300">
                   {ACCOUNT_CATEGORIES[formState.category]?.isLiability
@@ -820,6 +1423,70 @@ export default function AccountsTab({
                   />
                 </label>
               </div>
+
+              {/* Quick Inline Stock / RSU Setup when creating an Investment / 401k account */}
+              {!editingAccount &&
+                (formState.category === 'investment' || formState.category === 'retirement_401k') && (
+                  <div className="rounded-xl border border-sky-500/25 bg-sky-500/5 p-3.5">
+                    <label className="flex cursor-pointer items-center gap-2 font-medium text-sky-200">
+                      <input
+                        type="checkbox"
+                        checked={formState.add_initial_holding}
+                        onChange={(e) =>
+                          setFormState({ ...formState, add_initial_holding: e.target.checked })
+                        }
+                        className="rounded border-zinc-700 bg-zinc-900 text-sky-500"
+                      />
+                      Tie balance to live Stock / RSU ticker price (auto-updates on page open)
+                    </label>
+
+                    {formState.add_initial_holding && (
+                      <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
+                        <input
+                          type="text"
+                          required
+                          placeholder="Ticker (NVDA)"
+                          value={formState.holding_symbol}
+                          onChange={(e) =>
+                            setFormState({ ...formState, holding_symbol: e.target.value.toUpperCase() })
+                          }
+                          className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
+                        />
+                        <select
+                          value={formState.holding_type}
+                          onChange={(e) => setFormState({ ...formState, holding_type: e.target.value })}
+                          className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 text-xs text-zinc-100"
+                        >
+                          <option value="rsu">RSU</option>
+                          <option value="stock">Stock</option>
+                          <option value="etf">ETF</option>
+                          <option value="espp">ESPP</option>
+                        </select>
+                        <input
+                          type="number"
+                          step="0.0001"
+                          min="0"
+                          required
+                          placeholder="Vested Shares"
+                          value={formState.holding_shares}
+                          onChange={(e) => setFormState({ ...formState, holding_shares: e.target.value })}
+                          className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
+                        />
+                        <input
+                          type="number"
+                          step="0.0001"
+                          min="0"
+                          placeholder="Unvested"
+                          value={formState.holding_unvested_shares}
+                          onChange={(e) =>
+                            setFormState({ ...formState, holding_unvested_shares: e.target.value })
+                          }
+                          className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
 
               {/* Conditional 401(k) fields */}
               {formState.category === 'retirement_401k' && (
@@ -853,46 +1520,122 @@ export default function AccountsTab({
                 </div>
               )}
 
-              {/* Conditional Credit Card fields */}
+              {/* Conditional Credit Card fields + Optional 0% Promo Balance Transfer */}
               {formState.category === 'credit_card' && (
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                  <label className="block text-zinc-300">
-                    Credit Limit ($)
-                    <input
-                      type="number"
-                      step="1"
-                      min="0"
-                      placeholder="15000"
-                      value={formState.credit_limit}
-                      onChange={(e) => setFormState({ ...formState, credit_limit: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
-                    />
-                  </label>
-                  <label className="block text-zinc-300">
-                    Min Payment ($)
-                    <input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      placeholder="35"
-                      value={formState.minimum_payment}
-                      onChange={(e) => setFormState({ ...formState, minimum_payment: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
-                    />
-                  </label>
-                  <label className="block text-zinc-300">
-                    Due Day (1–31)
-                    <input
-                      type="number"
-                      min="1"
-                      max="31"
-                      placeholder="18"
-                      value={formState.due_day}
-                      onChange={(e) => setFormState({ ...formState, due_day: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
-                    />
-                  </label>
-                </div>
+                <>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                    <label className="block text-zinc-300">
+                      Credit Limit ($)
+                      <input
+                        type="number"
+                        step="1"
+                        min="0"
+                        placeholder="15000"
+                        value={formState.credit_limit}
+                        onChange={(e) => setFormState({ ...formState, credit_limit: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+                      />
+                    </label>
+                    <label className="block text-zinc-300">
+                      Min Payment ($)
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        placeholder="35"
+                        value={formState.minimum_payment}
+                        onChange={(e) => setFormState({ ...formState, minimum_payment: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+                      />
+                    </label>
+                    <label className="block text-zinc-300">
+                      Due Day (1–31)
+                      <input
+                        type="number"
+                        min="1"
+                        max="31"
+                        placeholder="18"
+                        value={formState.due_day}
+                        onChange={(e) => setFormState({ ...formState, due_day: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+
+                  {!editingAccount && (
+                    <div className="rounded-xl border border-amber-500/25 bg-amber-500/5 p-3.5">
+                      <label className="flex cursor-pointer items-center gap-2 font-medium text-amber-200">
+                        <input
+                          type="checkbox"
+                          checked={formState.add_initial_promo}
+                          onChange={(e) =>
+                            setFormState({ ...formState, add_initial_promo: e.target.checked })
+                          }
+                          className="rounded border-zinc-700 bg-zinc-900 text-amber-500"
+                        />
+                        Track 0% / Free Promo Balance Transfer Expiration Reminder
+                      </label>
+
+                      {formState.add_initial_promo && (
+                        <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                          <input
+                            type="text"
+                            placeholder="Promo label (e.g., Citi 0% BT)"
+                            value={formState.promo_label}
+                            onChange={(e) =>
+                              setFormState({ ...formState, promo_label: e.target.value })
+                            }
+                            className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-xs text-zinc-100"
+                          />
+                          <label className="block text-[11px] text-zinc-400">
+                            Promo Expires On *
+                            <input
+                              type="date"
+                              required
+                              value={formState.promo_expires_on}
+                              onChange={(e) =>
+                                setFormState({ ...formState, promo_expires_on: e.target.value })
+                              }
+                              className="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
+                            />
+                          </label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            placeholder="Promo Balance ($)"
+                            value={formState.promo_balance}
+                            onChange={(e) =>
+                              setFormState({ ...formState, promo_balance: e.target.value })
+                            }
+                            className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
+                          />
+                          <div className="grid grid-cols-2 gap-2">
+                            <input
+                              type="number"
+                              step="0.01"
+                              placeholder="Promo APR %"
+                              value={formState.promo_apr}
+                              onChange={(e) =>
+                                setFormState({ ...formState, promo_apr: e.target.value })
+                              }
+                              className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 font-mono text-xs text-zinc-100"
+                            />
+                            <input
+                              type="number"
+                              step="0.01"
+                              placeholder="After APR %"
+                              value={formState.standard_apr}
+                              onChange={(e) =>
+                                setFormState({ ...formState, standard_apr: e.target.value })
+                              }
+                              className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 font-mono text-xs text-zinc-100"
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
 
               {/* Conditional Active Loan fields */}
@@ -941,7 +1684,7 @@ export default function AccountsTab({
                 Notes (optional)
                 <input
                   type="text"
-                  placeholder="Allocation, autopay details, vesting notes…"
+                  placeholder="Allocation, vesting schedule, promo terms…"
                   value={formState.notes}
                   onChange={(e) => setFormState({ ...formState, notes: e.target.value })}
                   className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
@@ -970,7 +1713,7 @@ export default function AccountsTab({
         </div>
       )}
 
-      {/* MODAL 2: Batch Update All Balances (Fast Manual Check-In) */}
+      {/* MODAL 2: Batch Update Balances */}
       {batchModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
           <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl">
@@ -978,7 +1721,7 @@ export default function AccountsTab({
               <div>
                 <h2 className="text-base font-semibold text-zinc-100">Batch Balance Check-In</h2>
                 <p className="text-xs text-zinc-500">
-                  Update all your 401(k), bank, credit card, and loan balances in one pass and record a net worth snapshot.
+                  Update balances in one pass and record a net worth snapshot.
                 </p>
               </div>
               <button
@@ -1021,11 +1764,24 @@ export default function AccountsTab({
                     const prev = toNumber(acc.current_balance);
                     const next = parseFloat(batchValues[acc.id] ?? prev);
                     const diff = Number.isFinite(next) ? next - prev : 0;
+                    const ownerKey = acc.owner_profile || 'primary';
+                    const ownerBadge = OWNER_PROFILES[ownerKey] || OWNER_PROFILES.primary;
+                    const hasHoldings = (holdingsByAccount.get(acc.id) || []).length > 0;
 
                     return (
                       <div key={acc.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-xs">
                         <div className="min-w-0 flex-1">
-                          <div className="font-medium text-zinc-200">{acc.name}</div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-zinc-200">{acc.name}</span>
+                            <span className={`rounded border px-1.5 py-0.5 text-[10px] ${ownerBadge.badgeClass}`}>
+                              {getOwnerDisplayName(ownerKey, householdNames)}
+                            </span>
+                            {hasHoldings && (
+                              <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
+                                Auto-priced
+                              </span>
+                            )}
+                          </div>
                           <div className="text-[11px] text-zinc-500">
                             {ACCOUNT_CATEGORIES[acc.category]?.shortLabel} • Current: {formatCurrency(prev)}
                           </div>
@@ -1130,7 +1886,6 @@ export default function AccountsTab({
               </div>
             )}
 
-            {/* Add / Upsert Historical Snapshot */}
             <form onSubmit={handleAddAccountSnapshot} className="mb-5 grid grid-cols-1 gap-2.5 sm:grid-cols-4">
               <input
                 type="date"
@@ -1164,7 +1919,6 @@ export default function AccountsTab({
               </button>
             </form>
 
-            {/* Snapshot List */}
             <div className="divide-y divide-zinc-900 rounded-xl border border-zinc-800/80 px-4">
               {[...accountSnapshots].reverse().map((snap) => (
                 <div key={snap.id} className="flex items-center justify-between py-2.5 text-xs">
@@ -1188,6 +1942,396 @@ export default function AccountsTab({
               ))}
               {accountSnapshots.length === 0 && (
                 <div className="py-6 text-center text-xs text-zinc-500">No historical snapshots yet.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 4: Manage Stock & RSU Holdings */}
+      {holdingsAccount && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div>
+                <h2 className="text-base font-semibold text-zinc-100">
+                  {holdingsAccount.name} — Stocks & RSUs
+                </h2>
+                <p className="text-xs text-zinc-500">
+                  Live market prices refresh automatically when you open VaultLedger and update this account’s balance.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHoldingsAccount(null)}
+                className="rounded-lg p-1 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {holdingError && (
+              <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200">
+                {holdingError}
+              </div>
+            )}
+
+            {/* Uninvested Cash Sweep + Live Refresh */}
+            <div className="mb-5 flex flex-wrap items-end justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 text-xs">
+              <div className="flex items-end gap-2">
+                <label className="block text-zinc-300">
+                  Uninvested Cash Sweep ($)
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={holdingCashInput}
+                    onChange={(e) => setHoldingCashInput(e.target.value)}
+                    className="mt-1 block w-40 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 font-mono text-sm text-zinc-100"
+                  />
+                </label>
+                <button
+                  type="button"
+                  disabled={savingHolding}
+                  onClick={handleSaveHoldingCash}
+                  className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 font-medium text-zinc-200 hover:bg-zinc-700"
+                >
+                  Save Cash
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={onRefreshQuotes}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-500/15 px-3 py-2 font-medium text-sky-200 hover:bg-sky-500/25"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                Refresh Live Prices Now
+              </button>
+            </div>
+
+            {/* Add New Ticker Form */}
+            <form onSubmit={handleAddHolding} className="mb-5 space-y-2.5 text-xs">
+              <div className="font-semibold text-zinc-300">Add Stock / RSU Grant</div>
+              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-6">
+                <input
+                  type="text"
+                  required
+                  placeholder="Ticker (AAPL)"
+                  value={newSymbol}
+                  onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
+                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
+                />
+                <select
+                  value={newHoldingType}
+                  onChange={(e) => setNewHoldingType(e.target.value)}
+                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 text-zinc-100"
+                >
+                  <option value="rsu">RSU</option>
+                  <option value="stock">Stock</option>
+                  <option value="etf">ETF</option>
+                  <option value="espp">ESPP</option>
+                </select>
+                <input
+                  type="number"
+                  step="0.0001"
+                  min="0"
+                  required
+                  placeholder="Vested Shares"
+                  value={newVestedShares}
+                  onChange={(e) => setNewVestedShares(e.target.value)}
+                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
+                />
+                <input
+                  type="number"
+                  step="0.0001"
+                  min="0"
+                  placeholder="Unvested"
+                  value={newUnvestedShares}
+                  onChange={(e) => setNewUnvestedShares(e.target.value)}
+                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
+                />
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  placeholder="Grant/Cost $"
+                  value={newCostBasis}
+                  onChange={(e) => setNewCostBasis(e.target.value)}
+                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
+                />
+                <button
+                  type="submit"
+                  disabled={savingHolding}
+                  className="rounded-lg bg-emerald-500 px-3 py-2 font-semibold text-zinc-950 hover:bg-emerald-400 disabled:opacity-50"
+                >
+                  {savingHolding ? 'Fetching…' : '+ Add Ticker'}
+                </button>
+              </div>
+            </form>
+
+            {/* Holdings Table */}
+            <div className="divide-y divide-zinc-900 rounded-xl border border-zinc-800 px-4">
+              {(holdingsByAccount.get(holdingsAccount.id) || []).map((h) => {
+                const mktVal = toNumber(h.shares) * toNumber(h.last_price);
+                const isEditing = editingHoldingId === h.id;
+
+                return (
+                  <div key={h.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-xs">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-sm font-semibold text-zinc-100">{h.symbol}</span>
+                        <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] uppercase text-zinc-400">
+                          {HOLDING_TYPES[h.holding_type]?.label || h.holding_type}
+                        </span>
+                        <span className="font-mono text-zinc-400">
+                          @ ${toNumber(h.last_price).toFixed(2)}
+                        </span>
+                      </div>
+
+                      {isEditing ? (
+                        <div className="mt-2 flex items-center gap-2">
+                          <label className="text-[11px] text-zinc-400">
+                            Vested:
+                            <input
+                              type="number"
+                              step="0.0001"
+                              value={editVestedInput}
+                              onChange={(e) => setEditVestedInput(e.target.value)}
+                              className="ml-1 w-24 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-zinc-100"
+                            />
+                          </label>
+                          <label className="text-[11px] text-zinc-400">
+                            Unvested:
+                            <input
+                              type="number"
+                              step="0.0001"
+                              value={editUnvestedInput}
+                              onChange={(e) => setEditUnvestedInput(e.target.value)}
+                              className="ml-1 w-24 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-zinc-100"
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => handleSaveEditedHolding(h.id)}
+                            className="rounded bg-emerald-500 px-2.5 py-1 font-semibold text-zinc-950"
+                          >
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingHoldingId(null)}
+                            className="text-zinc-500 hover:text-zinc-300"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="mt-0.5 text-[11px] text-zinc-500">
+                          {toNumber(h.shares)} vested shares
+                          {toNumber(h.unvested_shares) > 0
+                            ? ` • ${toNumber(h.unvested_shares)} unvested RSU shares`
+                            : ''}
+                          {h.cost_basis_per_share ? ` • Cost $${toNumber(h.cost_basis_per_share).toFixed(2)}` : ''}
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <span className="font-mono text-sm font-semibold text-zinc-100 tabular-nums">
+                        {mask(formatCurrency(mktVal))}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingHoldingId(h.id);
+                          setEditVestedInput(String(toNumber(h.shares)));
+                          setEditUnvestedInput(String(toNumber(h.unvested_shares)));
+                        }}
+                        className="text-zinc-500 hover:text-zinc-200"
+                        title="Edit vested / unvested shares"
+                      >
+                        <Pencil className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteHolding(h.id)}
+                        className="text-zinc-500 hover:text-rose-400"
+                        title="Remove holding"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {(holdingsByAccount.get(holdingsAccount.id) || []).length === 0 && (
+                <div className="py-8 text-center text-xs text-zinc-500">
+                  No stock or RSU tickers added to this account yet.
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: Manage 0% / Free Promo Balance Transfers */}
+      {promoAccount && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+          <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
+              <div>
+                <h2 className="text-base font-semibold text-zinc-100">
+                  {promoAccount.name} — 0% Promo Balance Transfers
+                </h2>
+                <p className="text-xs text-zinc-500">
+                  Track promo end dates, monthly payoff pace, and post-promo APR spikes so you never miss an expiration.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPromoAccount(null)}
+                className="rounded-lg p-1 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {promoError && (
+              <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200">
+                {promoError}
+              </div>
+            )}
+
+            <form onSubmit={handleAddPromo} className="mb-5 grid grid-cols-1 gap-2.5 sm:grid-cols-6 text-xs">
+              <input
+                type="text"
+                required
+                placeholder="Promo label (e.g., 18-mo 0% BT)"
+                value={promoLabel}
+                onChange={(e) => setPromoLabel(e.target.value)}
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-zinc-100 sm:col-span-2"
+              />
+              <input
+                type="number"
+                step="0.01"
+                required
+                placeholder="Remaining ($)"
+                value={promoBalance}
+                onChange={(e) => setPromoBalance(e.target.value)}
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
+              />
+              <input
+                type="number"
+                step="0.01"
+                placeholder="Original ($)"
+                value={promoOriginal}
+                onChange={(e) => setPromoOriginal(e.target.value)}
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
+              />
+              <label className="block text-[10px] text-zinc-400 sm:col-span-2">
+                Promo Expires On *
+                <input
+                  type="date"
+                  required
+                  value={promoExpiresOn}
+                  onChange={(e) => setPromoExpiresOn(e.target.value)}
+                  className="mt-0.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
+                />
+              </label>
+
+              <input
+                type="number"
+                step="0.01"
+                placeholder="Promo APR %"
+                value={promoApr}
+                onChange={(e) => setPromoApr(e.target.value)}
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
+              />
+              <input
+                type="number"
+                step="0.01"
+                placeholder="Revert APR %"
+                value={promoStdApr}
+                onChange={(e) => setPromoStdApr(e.target.value)}
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
+              />
+              <input
+                type="text"
+                placeholder="Notes (optional)"
+                value={promoNotes}
+                onChange={(e) => setPromoNotes(e.target.value)}
+                className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-zinc-100 sm:col-span-3"
+              />
+              <button
+                type="submit"
+                disabled={savingPromo}
+                className="rounded-lg bg-amber-500 px-3 py-2 font-semibold text-zinc-950 hover:bg-amber-400 disabled:opacity-50"
+              >
+                {savingPromo ? 'Saving…' : '+ Add Promo'}
+              </button>
+            </form>
+
+            <div className="divide-y divide-zinc-900 rounded-xl border border-zinc-800 px-4">
+              {(promosByAccount.get(promoAccount.id) || []).map((p) => {
+                const st = computePromoStatus(p);
+                return (
+                  <div key={p.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-xs">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className={`font-semibold ${p.is_paid_off ? 'line-through text-zinc-500' : 'text-zinc-100'}`}>
+                          {p.label}
+                        </span>
+                        <span className="rounded bg-zinc-800 px-1.5 py-0.5 font-mono text-[10px] text-zinc-300">
+                          {formatPercent(p.promo_apr, 1)} → {p.standard_apr ? `${formatPercent(p.standard_apr, 2)}` : 'Std APR'}
+                        </span>
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-zinc-500">
+                        Expires {p.expires_on} •{' '}
+                        {p.is_paid_off
+                          ? 'Paid off'
+                          : st.daysLeft < 0
+                          ? `Expired ${Math.abs(st.daysLeft)} days ago`
+                          : `${st.daysLeft} days left (${formatCurrency(st.requiredMonthlyPayment, { decimals: 0 })}/mo to clear)`}
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => handleUpdatePromoBalance(p)}
+                        className="rounded border border-zinc-800 px-2 py-1 font-mono font-semibold text-amber-300 hover:border-zinc-700"
+                        title="Click to update remaining balance"
+                      >
+                        {mask(formatCurrency(p.promo_balance))}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleTogglePromoPaid(p)}
+                        className={`rounded p-1 ${
+                          p.is_paid_off ? 'text-emerald-400' : 'text-zinc-500 hover:text-emerald-400'
+                        }`}
+                        title={p.is_paid_off ? 'Reopen promo' : 'Mark paid off'}
+                      >
+                        <CheckCircle2 className="h-4 w-4" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeletePromo(p.id)}
+                        className="text-zinc-500 hover:text-rose-400"
+                        title="Delete promo"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {(promosByAccount.get(promoAccount.id) || []).length === 0 && (
+                <div className="py-8 text-center text-xs text-zinc-500">
+                  No balance transfer promos recorded on this card yet.
+                </div>
               )}
             </div>
           </div>

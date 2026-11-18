@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ShieldCheck,
   LayoutDashboard,
@@ -9,9 +9,19 @@ import {
   EyeOff,
   LogOut,
   RefreshCw,
+  Users,
+  TrendingUp,
+  Pencil,
+  X,
+  Check,
 } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import { seedDemoVaultData } from './lib/demoSeed';
+import {
+  filterByHouseholdScope,
+  todayIsoDate,
+  toNumber,
+} from './lib/finance';
 import AuthVaultGate from './components/AuthVaultGate';
 import OverviewTab from './components/OverviewTab';
 import AccountsTab from './components/AccountsTab';
@@ -30,6 +40,17 @@ function AuthenticatedVault({
   const [accountCategoryFilter, setAccountCategoryFilter] = useState('all');
   const [privacyMode, setPrivacyMode] = useState(false);
 
+  // Household view scope ('combined' | 'primary' | 'spouse' | 'joint')
+  const [householdScope, setHouseholdScope] = useState('combined');
+  const [householdNames, setHouseholdNames] = useState({
+    primary_name: 'Me',
+    spouse_name: 'Wife',
+  });
+  const [namesModalOpen, setNamesModalOpen] = useState(false);
+  const [draftPrimaryName, setDraftPrimaryName] = useState('Me');
+  const [draftSpouseName, setDraftSpouseName] = useState('Wife');
+  const [savingNames, setSavingNames] = useState(false);
+
   // Shared cross-tab modals
   const [batchModalOpen, setBatchModalOpen] = useState(false);
   const [newAccountCategory, setNewAccountCategory] = useState(null);
@@ -40,49 +61,284 @@ function AuthenticatedVault({
   const [expenses, setExpenses] = useState([]);
   const [recurringBills, setRecurringBills] = useState([]);
   const [budgets, setBudgets] = useState([]);
+  const [equityHoldings, setEquityHoldings] = useState([]);
+  const [creditCardPromos, setCreditCardPromos] = useState([]);
+
   const [loadingData, setLoadingData] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [seedingDemo, setSeedingDemo] = useState(false);
 
-  const loadAllData = useCallback(async () => {
-    setLoadError('');
-    try {
-      const [accRes, snapRes, expRes, billRes, budRes] = await Promise.all([
-        supabase.from('accounts').select('*').order('id', { ascending: true }),
-        supabase
-          .from('balance_snapshots')
-          .select('*')
-          .order('snapshot_date', { ascending: true }),
-        supabase
-          .from('expenses')
-          .select('*')
-          .order('expense_date', { ascending: false })
-          .limit(2000),
-        supabase.from('recurring_bills').select('*').order('due_day', { ascending: true }),
-        supabase.from('monthly_budgets').select('*'),
-      ]);
+  // Live Stock/RSU quote refresh state
+  const [quotesRefreshing, setQuotesRefreshing] = useState(false);
+  const [lastQuotesSyncAt, setLastQuotesSyncAt] = useState(null);
+  const [quoteStatusError, setQuoteStatusError] = useState('');
+  const autoRefreshedOnOpenRef = useRef(false);
 
-      if (accRes.error) throw accRes.error;
-      if (snapRes.error) throw snapRes.error;
-      if (expRes.error) throw expRes.error;
-      if (billRes.error) throw billRes.error;
-      if (budRes.error) throw budRes.error;
+  const refreshStockPrices = useCallback(
+    async (accountsList, holdingsList) => {
+      const activeAccountIds = new Set(
+        (accountsList || []).filter((a) => !a.is_archived).map((a) => a.id)
+      );
+      const activeHoldings = (holdingsList || []).filter((h) =>
+        activeAccountIds.has(h.account_id)
+      );
 
-      setAccounts(accRes.data || []);
-      setSnapshots(snapRes.data || []);
-      setExpenses(expRes.data || []);
-      setRecurringBills(billRes.data || []);
-      setBudgets(budRes.data || []);
-    } catch (err) {
-      setLoadError(err?.message || 'Failed to load vault records under RLS.');
-    } finally {
-      setLoadingData(false);
-    }
-  }, []);
+      const uniqueSymbols = Array.from(
+        new Set(
+          activeHoldings
+            .map((h) => (h.symbol || '').trim().toUpperCase())
+            .filter(Boolean)
+        )
+      );
+
+      if (uniqueSymbols.length === 0) return null;
+
+      setQuotesRefreshing(true);
+      setQuoteStatusError('');
+
+      try {
+        const { data, error } = await supabase.functions.invoke('stock-quotes', {
+          body: { symbols: uniqueSymbols },
+        });
+        if (error) throw error;
+
+        const quotes = data?.quotes || {};
+        const nowIso = data?.fetchedAt || new Date().toISOString();
+        const today = todayIsoDate();
+
+        const updatedHoldings = (holdingsList || []).map((h) => {
+          const sym = (h.symbol || '').trim().toUpperCase();
+          const q = quotes[sym];
+          if (!q || !Number.isFinite(Number(q.price)) || Number(q.price) <= 0) {
+            return h;
+          }
+          return {
+            ...h,
+            last_price: Number(q.price),
+            prev_close: Number.isFinite(Number(q.prevClose)) ? Number(q.prevClose) : h.prev_close,
+            last_price_at: q.fetchedAt || nowIso,
+          };
+        });
+
+        // Persist updated prices on holdings
+        const holdingUpdates = updatedHoldings.filter((h, idx) => h !== holdingsList[idx]);
+        if (holdingUpdates.length > 0) {
+          await Promise.all(
+            holdingUpdates.map((h) =>
+              supabase
+                .from('equity_holdings')
+                .update({
+                  last_price: h.last_price,
+                  prev_close: h.prev_close,
+                  last_price_at: h.last_price_at,
+                })
+                .eq('id', h.id)
+            )
+          );
+        }
+
+        // Recalculate account balances = cash_balance + sum(vested_shares * live_price)
+        const holdingsByAccount = new Map();
+        for (const h of updatedHoldings) {
+          if (!holdingsByAccount.has(h.account_id)) holdingsByAccount.set(h.account_id, []);
+          holdingsByAccount.get(h.account_id).push(h);
+        }
+
+        const snapshotUpserts = [];
+        const updatedAccounts = (accountsList || []).map((acc) => {
+          const accHoldings = holdingsByAccount.get(acc.id);
+          if (!accHoldings || accHoldings.length === 0 || acc.is_archived) return acc;
+
+          const equityTotal = accHoldings.reduce(
+            (sum, h) => sum + toNumber(h.shares) * toNumber(h.last_price),
+            0
+          );
+          const nextBalance = Number((toNumber(acc.cash_balance) + equityTotal).toFixed(2));
+          snapshotUpserts.push({
+            account_id: acc.id,
+            snapshot_date: today,
+            balance: nextBalance,
+            note: 'Auto stock/RSU refresh',
+          });
+
+          if (Math.abs(nextBalance - toNumber(acc.current_balance)) >= 0.01) {
+            return {
+              ...acc,
+              current_balance: nextBalance,
+              last_updated_at: nowIso,
+            };
+          }
+          return acc;
+        });
+
+        // Persist recalculated account balances
+        const changedAccounts = updatedAccounts.filter(
+          (acc, idx) => acc !== accountsList[idx]
+        );
+        if (changedAccounts.length > 0) {
+          await Promise.all(
+            changedAccounts.map((acc) =>
+              supabase
+                .from('accounts')
+                .update({
+                  current_balance: acc.current_balance,
+                  last_updated_at: acc.last_updated_at,
+                })
+                .eq('id', acc.id)
+            )
+          );
+        }
+
+        // Upsert today's snapshot so Net Worth history reflects live market move
+        if (snapshotUpserts.length > 0) {
+          await supabase
+            .from('balance_snapshots')
+            .upsert(snapshotUpserts, { onConflict: 'account_id,snapshot_date' });
+        }
+
+        setEquityHoldings(updatedHoldings);
+        setAccounts(updatedAccounts);
+        setSnapshots((prevSnaps) => {
+          const next = [...prevSnaps];
+          for (const up of snapshotUpserts) {
+            const idx = next.findIndex(
+              (s) => s.account_id === up.account_id && s.snapshot_date === up.snapshot_date
+            );
+            if (idx >= 0) {
+              next[idx] = { ...next[idx], balance: up.balance, note: up.note };
+            } else {
+              next.push({ id: `temp-${up.account_id}-${up.snapshot_date}`, ...up });
+            }
+          }
+          return next;
+        });
+
+        setLastQuotesSyncAt(nowIso);
+        return quotes;
+      } catch (err) {
+        setQuoteStatusError(err?.message || 'Live quote refresh failed');
+        return null;
+      } finally {
+        setQuotesRefreshing(false);
+      }
+    },
+    []
+  );
+
+  const loadAllData = useCallback(
+    async ({ refreshQuotes = false } = {}) => {
+      setLoadError('');
+      try {
+        const [accRes, snapRes, expRes, billRes, budRes, settingsRes, holdRes, promoRes] =
+          await Promise.all([
+            supabase.from('accounts').select('*').order('id', { ascending: true }),
+            supabase
+              .from('balance_snapshots')
+              .select('*')
+              .order('snapshot_date', { ascending: true }),
+            supabase
+              .from('expenses')
+              .select('*')
+              .order('expense_date', { ascending: false })
+              .limit(2000),
+            supabase.from('recurring_bills').select('*').order('due_day', { ascending: true }),
+            supabase.from('monthly_budgets').select('*'),
+            supabase.from('household_settings').select('*').maybeSingle(),
+            supabase.from('equity_holdings').select('*').order('id', { ascending: true }),
+            supabase.from('credit_card_promos').select('*').order('expires_on', { ascending: true }),
+          ]);
+
+        if (accRes.error) throw accRes.error;
+        if (snapRes.error) throw snapRes.error;
+        if (expRes.error) throw expRes.error;
+        if (billRes.error) throw billRes.error;
+        if (budRes.error) throw budRes.error;
+        if (settingsRes.error) throw settingsRes.error;
+        if (holdRes.error) throw holdRes.error;
+        if (promoRes.error) throw promoRes.error;
+
+        const loadedAccounts = accRes.data || [];
+        const loadedHoldings = holdRes.data || [];
+
+        setAccounts(loadedAccounts);
+        setSnapshots(snapRes.data || []);
+        setExpenses(expRes.data || []);
+        setRecurringBills(billRes.data || []);
+        setBudgets(budRes.data || []);
+        setEquityHoldings(loadedHoldings);
+        setCreditCardPromos(promoRes.data || []);
+
+        if (settingsRes.data) {
+          setHouseholdNames({
+            primary_name: settingsRes.data.primary_name || 'Me',
+            spouse_name: settingsRes.data.spouse_name || 'Wife',
+          });
+        }
+
+        const shouldAutoRefresh =
+          loadedHoldings.length > 0 &&
+          (refreshQuotes || !autoRefreshedOnOpenRef.current);
+
+        if (shouldAutoRefresh) {
+          autoRefreshedOnOpenRef.current = true;
+          // Refresh live prices immediately on webpage open without blocking initial paint
+          refreshStockPrices(loadedAccounts, loadedHoldings);
+        }
+      } catch (err) {
+        setLoadError(err?.message || 'Failed to load vault records under RLS.');
+      } finally {
+        setLoadingData(false);
+      }
+    },
+    [refreshStockPrices]
+  );
 
   useEffect(() => {
     loadAllData();
   }, [loadAllData]);
+
+  // Scoped datasets for Combined vs Primary vs Spouse vs Joint
+  const scopedAccounts = useMemo(
+    () => filterByHouseholdScope(accounts, householdScope),
+    [accounts, householdScope]
+  );
+
+  const scopedAccountIds = useMemo(
+    () => new Set(scopedAccounts.map((a) => a.id)),
+    [scopedAccounts]
+  );
+
+  const scopedSnapshots = useMemo(
+    () => snapshots.filter((s) => scopedAccountIds.has(s.account_id)),
+    [snapshots, scopedAccountIds]
+  );
+
+  const scopedExpenses = useMemo(
+    () => filterByHouseholdScope(expenses, householdScope),
+    [expenses, householdScope]
+  );
+
+  const scopedRecurringBills = useMemo(
+    () => filterByHouseholdScope(recurringBills, householdScope),
+    [recurringBills, householdScope]
+  );
+
+  const scopedHoldings = useMemo(
+    () => equityHoldings.filter((h) => scopedAccountIds.has(h.account_id)),
+    [equityHoldings, scopedAccountIds]
+  );
+
+  const scopedPromos = useMemo(
+    () => creditCardPromos.filter((p) => scopedAccountIds.has(p.account_id)),
+    [creditCardPromos, scopedAccountIds]
+  );
+
+  const hasJointItems = useMemo(
+    () =>
+      accounts.some((a) => a.owner_profile === 'joint') ||
+      expenses.some((e) => e.owner_profile === 'joint'),
+    [accounts, expenses]
+  );
 
   const handleNavigateTab = (tab, categoryFilter) => {
     if (categoryFilter) setAccountCategoryFilter(categoryFilter);
@@ -104,11 +360,34 @@ function AuthenticatedVault({
     setSeedingDemo(true);
     try {
       await seedDemoVaultData(supabase);
-      await loadAllData();
+      await loadAllData({ refreshQuotes: true });
     } catch (err) {
       setLoadError(err?.message || 'Failed to load sample data.');
     } finally {
       setSeedingDemo(false);
+    }
+  };
+
+  const handleSaveHouseholdNames = async (e) => {
+    e.preventDefault();
+    const pName = draftPrimaryName.trim() || 'Me';
+    const sName = draftSpouseName.trim() || 'Wife';
+    setSavingNames(true);
+    try {
+      const { error } = await supabase.from('household_settings').upsert(
+        {
+          user_id: session.user.id,
+          primary_name: pName,
+          spouse_name: sName,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'user_id' }
+      );
+      if (error) throw error;
+      setHouseholdNames({ primary_name: pName, spouse_name: sName });
+      setNamesModalOpen(false);
+    } finally {
+      setSavingNames(false);
     }
   };
 
@@ -119,12 +398,19 @@ function AuthenticatedVault({
     { key: 'security', label: 'Security & 2FA', icon: Lock },
   ];
 
+  const scopeOptions = [
+    { key: 'combined', label: 'Combined' },
+    { key: 'primary', label: householdNames.primary_name },
+    { key: 'spouse', label: householdNames.spouse_name },
+    ...(hasJointItems ? [{ key: 'joint', label: 'Joint' }] : []),
+  ];
+
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-100">
       {/* Top Sticky Command Header */}
       <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-[#09090b]/90 backdrop-blur-md">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <div className="flex items-center gap-6">
+          <div className="flex items-center gap-5">
             <button
               type="button"
               onClick={() => setActiveTab('overview')}
@@ -149,12 +435,12 @@ function AuthenticatedVault({
                   </span>
                 </div>
                 <div className="hidden text-[11px] text-zinc-500 sm:block">
-                  Private Net Worth, Debt & Expense Terminal
+                  Household Net Worth, RSU & Debt Terminal
                 </div>
               </div>
             </button>
 
-            <nav className="hidden items-center gap-1 md:flex">
+            <nav className="hidden items-center gap-1 lg:flex">
               {navItems.map((item) => {
                 const Icon = item.icon;
                 const active = activeTab === item.key;
@@ -177,12 +463,74 @@ function AuthenticatedVault({
             </nav>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Household Scope Switcher */}
+            {activeTab !== 'security' && (
+              <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 p-0.5 text-[11px]">
+                <Users className="ml-1.5 mr-0.5 hidden h-3.5 w-3.5 text-zinc-500 sm:inline" />
+                {scopeOptions.map((opt) => (
+                  <button
+                    key={opt.key}
+                    type="button"
+                    onClick={() => setHouseholdScope(opt.key)}
+                    className={`rounded-md px-2.5 py-1 font-medium transition ${
+                      householdScope === opt.key
+                        ? opt.key === 'spouse'
+                          ? 'bg-fuchsia-500/20 text-fuchsia-200'
+                          : opt.key === 'primary'
+                          ? 'bg-emerald-500/20 text-emerald-200'
+                          : 'bg-zinc-800 text-zinc-100'
+                        : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraftPrimaryName(householdNames.primary_name);
+                    setDraftSpouseName(householdNames.spouse_name);
+                    setNamesModalOpen(true);
+                  }}
+                  title="Customize household names"
+                  className="rounded-md p-1 text-zinc-500 hover:bg-zinc-900 hover:text-zinc-200"
+                >
+                  <Pencil className="h-3 w-3" />
+                </button>
+              </div>
+            )}
+
+            {/* Live Stock/RSU Quotes Button */}
+            {equityHoldings.length > 0 && (
+              <button
+                type="button"
+                disabled={quotesRefreshing}
+                onClick={() => refreshStockPrices(accounts, equityHoldings)}
+                title={
+                  quoteStatusError ||
+                  (lastQuotesSyncAt
+                    ? `Last live market sync: ${new Date(lastQuotesSyncAt).toLocaleTimeString()}`
+                    : 'Refresh live stock & RSU prices')
+                }
+                className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
+                  quoteStatusError
+                    ? 'border-amber-500/40 bg-amber-500/10 text-amber-300'
+                    : 'border-sky-500/30 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20'
+                }`}
+              >
+                <TrendingUp className={`h-3.5 w-3.5 ${quotesRefreshing ? 'animate-pulse' : ''}`} />
+                <span className="hidden sm:inline">
+                  {quotesRefreshing ? 'Updating Quotes…' : 'Live Quotes'}
+                </span>
+              </button>
+            )}
+
             {accounts.length > 0 && (
               <button
                 type="button"
                 onClick={handleOpenBatchFromAnywhere}
-                className="hidden items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/20 sm:inline-flex"
+                className="hidden items-center gap-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-300 hover:bg-emerald-500/20 xl:inline-flex"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
                 Update Balances
@@ -215,8 +563,8 @@ function AuthenticatedVault({
           </div>
         </div>
 
-        {/* Mobile Nav Strip */}
-        <div className="flex items-center gap-1 overflow-x-auto border-t border-zinc-900 px-4 py-2 md:hidden">
+        {/* Tablet/Mobile Nav Strip */}
+        <div className="flex items-center gap-1 overflow-x-auto border-t border-zinc-900 px-4 py-2 lg:hidden">
           {navItems.map((item) => {
             const Icon = item.icon;
             const active = activeTab === item.key;
@@ -254,11 +602,20 @@ function AuthenticatedVault({
           <>
             {activeTab === 'overview' && (
               <OverviewTab
-                accounts={accounts}
-                snapshots={snapshots}
-                expenses={expenses}
-                recurringBills={recurringBills}
+                accounts={scopedAccounts}
+                allAccounts={accounts}
+                snapshots={scopedSnapshots}
+                expenses={scopedExpenses}
+                recurringBills={scopedRecurringBills}
                 budgets={budgets}
+                equityHoldings={scopedHoldings}
+                promos={scopedPromos}
+                householdScope={householdScope}
+                onChangeHouseholdScope={setHouseholdScope}
+                householdNames={householdNames}
+                quotesRefreshing={quotesRefreshing}
+                lastQuotesSyncAt={lastQuotesSyncAt}
+                onRefreshQuotes={() => refreshStockPrices(accounts, equityHoldings)}
                 privacyMode={privacyMode}
                 hasMfaEnrolled={hasMfaEnrolled}
                 onNavigateTab={handleNavigateTab}
@@ -272,11 +629,16 @@ function AuthenticatedVault({
             {activeTab === 'accounts' && (
               <AccountsTab
                 supabase={supabase}
-                accounts={accounts}
-                snapshots={snapshots}
+                accounts={scopedAccounts}
+                snapshots={scopedSnapshots}
+                equityHoldings={scopedHoldings}
+                promos={scopedPromos}
+                householdScope={householdScope}
+                householdNames={householdNames}
                 initialCategoryFilter={accountCategoryFilter}
                 privacyMode={privacyMode}
-                onDataChanged={loadAllData}
+                onDataChanged={(opts) => loadAllData(opts)}
+                onRefreshQuotes={() => refreshStockPrices(accounts, equityHoldings)}
                 batchModalOpen={batchModalOpen}
                 setBatchModalOpen={setBatchModalOpen}
                 newAccountCategory={newAccountCategory}
@@ -287,12 +649,14 @@ function AuthenticatedVault({
             {activeTab === 'expenses' && (
               <ExpensesTab
                 supabase={supabase}
-                accounts={accounts}
-                expenses={expenses}
-                recurringBills={recurringBills}
+                accounts={scopedAccounts}
+                expenses={scopedExpenses}
+                recurringBills={scopedRecurringBills}
                 budgets={budgets}
+                householdScope={householdScope}
+                householdNames={householdNames}
                 privacyMode={privacyMode}
-                onDataChanged={loadAllData}
+                onDataChanged={() => loadAllData()}
               />
             )}
 
@@ -309,12 +673,74 @@ function AuthenticatedVault({
                 expenses={expenses}
                 recurringBills={recurringBills}
                 budgets={budgets}
-                onDataChanged={loadAllData}
+                equityHoldings={equityHoldings}
+                creditCardPromos={creditCardPromos}
+                householdNames={householdNames}
+                onDataChanged={() => loadAllData()}
               />
             )}
           </>
         )}
       </main>
+
+      {/* Modal: Customize Household Display Names */}
+      {namesModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl">
+            <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
+              <h3 className="text-base font-semibold text-zinc-100">Household Profile Labels</h3>
+              <button
+                type="button"
+                onClick={() => setNamesModalOpen(false)}
+                className="text-zinc-500 hover:text-zinc-200"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveHouseholdNames} className="space-y-4 text-xs">
+              <label className="block text-zinc-300">
+                Primary Member Label
+                <input
+                  type="text"
+                  required
+                  value={draftPrimaryName}
+                  onChange={(e) => setDraftPrimaryName(e.target.value)}
+                  placeholder="Me"
+                  className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
+                />
+              </label>
+              <label className="block text-zinc-300">
+                Spouse / Partner Label
+                <input
+                  type="text"
+                  required
+                  value={draftSpouseName}
+                  onChange={(e) => setDraftSpouseName(e.target.value)}
+                  placeholder="Wife"
+                  className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
+                />
+              </label>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setNamesModalOpen(false)}
+                  className="rounded-lg border border-zinc-800 px-4 py-2 text-zinc-400"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingNames}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-4 py-2 font-semibold text-zinc-950"
+                >
+                  <Check className="h-3.5 w-3.5" />
+                  {savingNames ? 'Saving…' : 'Save Labels'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

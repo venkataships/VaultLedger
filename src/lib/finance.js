@@ -453,3 +453,173 @@ export function estimateLoanPayoff(balance, annualRatePct, monthlyPayment) {
     warning: null,
   };
 }
+
+export const OWNER_PROFILES = {
+  primary: {
+    key: 'primary',
+    defaultLabel: 'Me',
+    badgeClass: 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300',
+  },
+  spouse: {
+    key: 'spouse',
+    defaultLabel: 'Wife',
+    badgeClass: 'border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300',
+  },
+  joint: {
+    key: 'joint',
+    defaultLabel: 'Joint',
+    badgeClass: 'border-sky-500/30 bg-sky-500/10 text-sky-300',
+  },
+};
+
+export const HOLDING_TYPES = {
+  rsu: { key: 'rsu', label: 'RSU' },
+  stock: { key: 'stock', label: 'Stock' },
+  etf: { key: 'etf', label: 'ETF' },
+  espp: { key: 'espp', label: 'ESPP' },
+};
+
+export function getOwnerDisplayName(ownerProfile, householdNames) {
+  const key = ownerProfile || 'primary';
+  if (key === 'primary') return householdNames?.primary_name || 'Me';
+  if (key === 'spouse') return householdNames?.spouse_name || 'Wife';
+  if (key === 'joint') return 'Joint';
+  return householdNames?.primary_name || 'Me';
+}
+
+export function filterByHouseholdScope(items, scope) {
+  if (!items) return [];
+  if (!scope || scope === 'combined') return items;
+  return items.filter((item) => (item.owner_profile || 'primary') === scope);
+}
+
+export function computeHouseholdBreakdown(accounts) {
+  const buckets = {
+    primary: { assets: 0, liabilities: 0, netWorth: 0, count: 0 },
+    spouse: { assets: 0, liabilities: 0, netWorth: 0, count: 0 },
+    joint: { assets: 0, liabilities: 0, netWorth: 0, count: 0 },
+    combined: { assets: 0, liabilities: 0, netWorth: 0, count: 0 },
+  };
+
+  for (const acc of accounts || []) {
+    if (acc.is_archived) continue;
+    const owner = buckets[acc.owner_profile] ? acc.owner_profile : 'primary';
+    const bal = toNumber(acc.current_balance);
+
+    if (acc.is_liability) {
+      buckets[owner].liabilities += bal;
+      buckets.combined.liabilities += bal;
+    } else {
+      buckets[owner].assets += bal;
+      buckets.combined.assets += bal;
+    }
+    buckets[owner].count += 1;
+    buckets.combined.count += 1;
+  }
+
+  for (const key of Object.keys(buckets)) {
+    buckets[key].netWorth = buckets[key].assets - buckets[key].liabilities;
+  }
+  return buckets;
+}
+
+export function computePromoStatus(promo) {
+  const promoBalance = toNumber(promo?.promo_balance);
+  const originalAmount = toNumber(promo?.original_amount);
+
+  if (!promo?.expires_on) {
+    return {
+      daysLeft: 0,
+      monthsLeft: 1,
+      requiredMonthlyPayment: promoBalance,
+      paidOffPct: 0,
+      urgency: promo?.is_paid_off || promoBalance <= 0 ? 'paid' : 'ok',
+    };
+  }
+
+  const [ey, em, ed] = promo.expires_on.split('-').map(Number);
+  const expDate = new Date(ey, em - 1, ed);
+  const now = new Date();
+  const todayMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const daysLeft = Math.ceil((expDate.getTime() - todayMidnight.getTime()) / 86400000);
+
+  const monthsLeft = Math.max(1, daysLeft / 30.4375);
+  const isPaid = Boolean(promo.is_paid_off) || promoBalance <= 0;
+  const requiredMonthlyPayment = isPaid
+    ? 0
+    : daysLeft <= 0
+    ? promoBalance
+    : promoBalance / monthsLeft;
+
+  const paidOffPct =
+    originalAmount > 0
+      ? Math.max(0, Math.min(100, ((originalAmount - promoBalance) / originalAmount) * 100))
+      : 0;
+
+  let urgency = 'ok';
+  if (isPaid) urgency = 'paid';
+  else if (daysLeft < 0) urgency = 'expired';
+  else if (daysLeft <= 45) urgency = 'urgent';
+  else if (daysLeft <= 90) urgency = 'warning';
+
+  return {
+    daysLeft,
+    monthsLeft,
+    requiredMonthlyPayment,
+    paidOffPct,
+    urgency,
+  };
+}
+
+export function computeAccountEquitySummary(account, holdingsForAccount) {
+  const holdings = holdingsForAccount || [];
+  const cashBalance = toNumber(account?.cash_balance);
+
+  if (holdings.length === 0) {
+    return {
+      hasHoldings: false,
+      vestedValue: 0,
+      unvestedValue: 0,
+      dayChangeValue: 0,
+      dayChangePct: 0,
+      cashBalance,
+      computedBalance: toNumber(account?.current_balance),
+      lastPriceAt: null,
+    };
+  }
+
+  let vestedValue = 0;
+  let unvestedValue = 0;
+  let prevVestedValue = 0;
+  let lastPriceAt = null;
+
+  for (const h of holdings) {
+    const shares = toNumber(h.shares);
+    const unvested = toNumber(h.unvested_shares);
+    const price = toNumber(h.last_price);
+    const prev = toNumber(h.prev_close) > 0 ? toNumber(h.prev_close) : price;
+
+    vestedValue += shares * price;
+    unvestedValue += unvested * price;
+    prevVestedValue += shares * prev;
+
+    if (h.last_price_at && (!lastPriceAt || h.last_price_at > lastPriceAt)) {
+      lastPriceAt = h.last_price_at;
+    }
+  }
+
+  const dayChangeValue = vestedValue - prevVestedValue;
+  const dayChangePct = prevVestedValue > 0 ? (dayChangeValue / prevVestedValue) * 100 : 0;
+
+  return {
+    hasHoldings: true,
+    vestedValue: Number(vestedValue.toFixed(2)),
+    unvestedValue: Number(unvestedValue.toFixed(2)),
+    dayChangeValue: Number(dayChangeValue.toFixed(2)),
+    dayChangePct: Number(dayChangePct.toFixed(2)),
+    cashBalance,
+    computedBalance: Number((cashBalance + vestedValue).toFixed(2)),
+    lastPriceAt,
+  };
+}
+
