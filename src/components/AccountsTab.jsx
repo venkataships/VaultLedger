@@ -94,12 +94,9 @@ export default function AccountsTab({
     contribution_pct: '',
     employer_match_pct: '',
     notes: '',
-    // Optional inline initial RSU/Stock holding on creation
+    // Optional inline initial Stock/RSU holdings on creation
     add_initial_holding: false,
-    holding_symbol: '',
-    holding_type: 'rsu',
-    holding_shares: '',
-    holding_unvested_shares: '',
+    initial_holdings: [{ symbol: '', holding_type: 'stock', shares: '', unvested_shares: '' }],
     // Optional inline 0% Balance Transfer Promo on creation
     add_initial_promo: false,
     promo_label: '',
@@ -133,6 +130,7 @@ export default function AccountsTab({
   const [newHoldingNotes, setNewHoldingNotes] = useState('');
   const [savingHolding, setSavingHolding] = useState(false);
   const [holdingError, setHoldingError] = useState('');
+  const [holdingNotice, setHoldingNotice] = useState('');
   const [editingHoldingId, setEditingHoldingId] = useState(null);
   const [editVestedInput, setEditVestedInput] = useState('');
   const [editUnvestedInput, setEditUnvestedInput] = useState('');
@@ -246,10 +244,14 @@ export default function AccountsTab({
       employer_match_pct: '',
       notes: '',
       add_initial_holding: false,
-      holding_symbol: '',
-      holding_type: 'rsu',
-      holding_shares: '',
-      holding_unvested_shares: '',
+      initial_holdings: [
+        {
+          symbol: '',
+          holding_type: cat === 'investment' ? 'stock' : 'rsu',
+          shares: '',
+          unvested_shares: '',
+        },
+      ],
       add_initial_promo: false,
       promo_label: '',
       promo_balance: '',
@@ -285,10 +287,7 @@ export default function AccountsTab({
         acc.metadata?.employer_match_pct !== undefined ? String(acc.metadata.employer_match_pct) : '',
       notes: acc.notes || '',
       add_initial_holding: false,
-      holding_symbol: '',
-      holding_type: 'rsu',
-      holding_shares: '',
-      holding_unvested_shares: '',
+      initial_holdings: [{ symbol: '', holding_type: 'stock', shares: '', unvested_shares: '' }],
       add_initial_promo: false,
       promo_label: '',
       promo_balance: '',
@@ -417,42 +416,52 @@ export default function AccountsTab({
         savedAccount = data;
       }
 
-      // Optional initial Stock/RSU ticker when creating a new asset account
+      // Optional initial Stock/RSU tickers when creating a new asset account
       let addedHolding = false;
+      const validInitialHoldings = (formState.initial_holdings || []).filter((h) =>
+        (h.symbol || '').trim()
+      );
       if (
         !editingAccount &&
         savedAccount &&
         formState.add_initial_holding &&
-        formState.holding_symbol.trim()
+        validInitialHoldings.length > 0
       ) {
-        const sym = formState.holding_symbol.trim().toUpperCase();
-        const vested = Number(parseFloat(formState.holding_shares || '0')) || 0;
-        const unvested = Number(parseFloat(formState.holding_unvested_shares || '0')) || 0;
+        const uniqueSyms = Array.from(
+          new Set(validInitialHoldings.map((h) => h.symbol.trim().toUpperCase()))
+        );
 
-        let livePrice = 0;
-        let prevClose = null;
-        let fetchedAt = null;
-        const { data: qData } = await supabase.functions.invoke('stock-quotes', {
-          body: { symbols: [sym] },
+        let quotesMap = {};
+        const { data: qData, error: qErr } = await supabase.functions.invoke('stock-quotes', {
+          body: { symbols: uniqueSyms },
         });
-        const q = qData?.quotes?.[sym];
-        if (q && Number(q.price) > 0) {
-          livePrice = Number(q.price);
-          prevClose = Number(q.prevClose) || livePrice;
-          fetchedAt = q.fetchedAt || new Date().toISOString();
+        if (!qErr && qData?.quotes) {
+          quotesMap = qData.quotes;
         }
 
-        await supabase.from('equity_holdings').insert({
-          account_id: savedAccount.id,
-          symbol: sym,
-          holding_type: formState.holding_type || 'rsu',
-          shares: vested,
-          unvested_shares: unvested,
-          last_price: livePrice,
-          prev_close: prevClose,
-          last_price_at: fetchedAt,
-          notes: '',
+        const rowsToInsert = validInitialHoldings.map((h) => {
+          const sym = h.symbol.trim().toUpperCase();
+          const q = quotesMap[sym];
+          const livePrice = q && Number(q.price) > 0 ? Number(q.price) : 0;
+          const prevClose = q && Number(q.prevClose) > 0 ? Number(q.prevClose) : livePrice || null;
+          const fetchedAt = q?.fetchedAt || (livePrice > 0 ? new Date().toISOString() : null);
+
+          return {
+            account_id: savedAccount.id,
+            symbol: sym,
+            holding_type: h.holding_type || 'stock',
+            shares: Math.max(0, Number(parseFloat(h.shares || '0')) || 0),
+            unvested_shares: Math.max(0, Number(parseFloat(h.unvested_shares || '0')) || 0),
+            cost_basis_per_share: null,
+            last_price: livePrice,
+            prev_close: prevClose,
+            last_price_at: fetchedAt,
+            notes: '',
+          };
         });
+
+        const { error: holdInsErr } = await supabase.from('equity_holdings').insert(rowsToInsert);
+        if (holdInsErr) throw holdInsErr;
 
         await recomputeAccountBalanceFromHoldings(savedAccount.id, cashVal);
         addedHolding = true;
@@ -615,8 +624,9 @@ export default function AccountsTab({
     setHoldingsAccount(acc);
     setHoldingCashInput(String(toNumber(acc.cash_balance)));
     setHoldingError('');
+    setHoldingNotice('');
     setNewSymbol('');
-    setNewHoldingType('rsu');
+    setNewHoldingType(acc.subtype === 'Employer RSUs / ESPP' ? 'rsu' : 'stock');
     setNewVestedShares('');
     setNewUnvestedShares('');
     setNewCostBasis('');
@@ -628,6 +638,7 @@ export default function AccountsTab({
     if (!holdingsAccount) return;
     setSavingHolding(true);
     setHoldingError('');
+    setHoldingNotice('');
     try {
       const cashVal = Number(parseFloat(holdingCashInput || '0').toFixed(2)) || 0;
       await recomputeAccountBalanceFromHoldings(holdingsAccount.id, cashVal);
@@ -651,6 +662,7 @@ export default function AccountsTab({
 
     setSavingHolding(true);
     setHoldingError('');
+    setHoldingNotice('');
     try {
       let livePrice = 0;
       let prevClose = null;
@@ -688,6 +700,9 @@ export default function AccountsTab({
       setNewUnvestedShares('');
       setNewCostBasis('');
       setNewHoldingNotes('');
+      setHoldingNotice(
+        `Added ${sym} (${vested} sh${livePrice > 0 ? ` @ $${livePrice.toFixed(2)}` : ''}) to ${holdingsAccount.name}`
+      );
       await onDataChanged();
     } catch (err) {
       setHoldingError(err?.message || 'Could not add holding.');
@@ -998,13 +1013,23 @@ export default function AccountsTab({
                     {/* Live Stock / RSU Holdings Breakdown */}
                     {eqSummary.hasHoldings && (
                       <div className="space-y-1.5 rounded-lg border border-sky-500/20 bg-sky-500/5 p-3 text-[11px]">
-                        <div className="flex items-center justify-between text-sky-200">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-sky-200">
                           <span className="font-medium">Live Stock & RSU Positions</span>
-                          {eqSummary.cashBalance > 0 && (
-                            <span className="font-mono text-zinc-400">
-                              + {mask(formatCurrency(eqSummary.cashBalance))} cash
-                            </span>
-                          )}
+                          <div className="flex items-center gap-2">
+                            {eqSummary.cashBalance > 0 && (
+                              <span className="font-mono text-zinc-400">
+                                + {mask(formatCurrency(eqSummary.cashBalance))} cash
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => openHoldingsModal(acc)}
+                              className="inline-flex items-center gap-1 rounded-md border border-sky-500/35 bg-sky-500/15 px-2 py-0.5 text-[10px] font-semibold text-sky-200 hover:bg-sky-500/25"
+                            >
+                              <Plus className="h-3 w-3" />
+                              Add Stock
+                            </button>
+                          </div>
                         </div>
                         <div className="divide-y divide-zinc-800/70">
                           {accHoldings.map((h) => {
@@ -1424,7 +1449,7 @@ export default function AccountsTab({
                 </label>
               </div>
 
-              {/* Quick Inline Stock / RSU Setup when creating an Investment / 401k account */}
+              {/* Multi-Stock / RSU Setup when creating an Investment / 401k account */}
               {!editingAccount &&
                 (formState.category === 'investment' || formState.category === 'retirement_401k') && (
                   <div className="rounded-xl border border-sky-500/25 bg-sky-500/5 p-3.5">
@@ -1437,54 +1462,143 @@ export default function AccountsTab({
                         }
                         className="rounded border-zinc-700 bg-zinc-900 text-sky-500"
                       />
-                      Tie balance to live Stock / RSU ticker price (auto-updates on page open)
+                      Tie balance to live Stock / RSU ticker prices (auto-updates on page open)
                     </label>
 
                     {formState.add_initial_holding && (
-                      <div className="mt-3 grid grid-cols-2 gap-2.5 sm:grid-cols-4">
-                        <input
-                          type="text"
-                          required
-                          placeholder="Ticker (NVDA)"
-                          value={formState.holding_symbol}
-                          onChange={(e) =>
-                            setFormState({ ...formState, holding_symbol: e.target.value.toUpperCase() })
+                      <div className="mt-3 space-y-2">
+                        <div className="grid grid-cols-12 gap-2 text-[10px] font-medium text-zinc-400">
+                          <span className="col-span-3">Ticker *</span>
+                          <span className="col-span-3">Type</span>
+                          <span className="col-span-3">Shares *</span>
+                          <span className="col-span-3">Unvested</span>
+                        </div>
+                        {(formState.initial_holdings || []).map((row, idx) => (
+                          <div key={idx} className="grid grid-cols-12 items-center gap-2">
+                            <input
+                              type="text"
+                              required={idx === 0}
+                              placeholder="NVDA"
+                              value={row.symbol}
+                              onChange={(e) => {
+                                const next = [...formState.initial_holdings];
+                                next[idx] = { ...next[idx], symbol: e.target.value.toUpperCase() };
+                                setFormState({ ...formState, initial_holdings: next });
+                              }}
+                              className="col-span-3 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 font-mono text-xs text-zinc-100"
+                            />
+                            <select
+                              value={row.holding_type}
+                              onChange={(e) => {
+                                const next = [...formState.initial_holdings];
+                                next[idx] = { ...next[idx], holding_type: e.target.value };
+                                setFormState({ ...formState, initial_holdings: next });
+                              }}
+                              className="col-span-3 rounded-lg border border-zinc-800 bg-zinc-900 px-1.5 py-1.5 text-xs text-zinc-100"
+                            >
+                              <option value="stock">Stock</option>
+                              <option value="etf">ETF</option>
+                              <option value="rsu">RSU</option>
+                              <option value="espp">ESPP</option>
+                            </select>
+                            <input
+                              type="number"
+                              step="0.0001"
+                              min="0"
+                              required={idx === 0 || Boolean(row.symbol.trim())}
+                              placeholder="100"
+                              value={row.shares}
+                              onChange={(e) => {
+                                const next = [...formState.initial_holdings];
+                                next[idx] = { ...next[idx], shares: e.target.value };
+                                setFormState({ ...formState, initial_holdings: next });
+                              }}
+                              className="col-span-3 rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 font-mono text-xs text-zinc-100"
+                            />
+                            <div className="col-span-3 flex items-center gap-1">
+                              <input
+                                type="number"
+                                step="0.0001"
+                                min="0"
+                                placeholder="0"
+                                value={row.unvested_shares}
+                                onChange={(e) => {
+                                  const next = [...formState.initial_holdings];
+                                  next[idx] = { ...next[idx], unvested_shares: e.target.value };
+                                  setFormState({ ...formState, initial_holdings: next });
+                                }}
+                                className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-1.5 font-mono text-xs text-zinc-100"
+                              />
+                              {formState.initial_holdings.length > 1 && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const next = formState.initial_holdings.filter((_, i) => i !== idx);
+                                    setFormState({ ...formState, initial_holdings: next });
+                                  }}
+                                  className="rounded p-1 text-zinc-500 hover:text-rose-400"
+                                  title="Remove row"
+                                >
+                                  <X className="h-3.5 w-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setFormState({
+                              ...formState,
+                              initial_holdings: [
+                                ...formState.initial_holdings,
+                                {
+                                  symbol: '',
+                                  holding_type: formState.category === 'investment' ? 'stock' : 'rsu',
+                                  shares: '',
+                                  unvested_shares: '',
+                                },
+                              ],
+                            })
                           }
-                          className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
-                        />
-                        <select
-                          value={formState.holding_type}
-                          onChange={(e) => setFormState({ ...formState, holding_type: e.target.value })}
-                          className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 text-xs text-zinc-100"
+                          className="inline-flex items-center gap-1 text-[11px] font-medium text-sky-300 hover:text-sky-200"
                         >
-                          <option value="rsu">RSU</option>
-                          <option value="stock">Stock</option>
-                          <option value="etf">ETF</option>
-                          <option value="espp">ESPP</option>
-                        </select>
-                        <input
-                          type="number"
-                          step="0.0001"
-                          min="0"
-                          required
-                          placeholder="Vested Shares"
-                          value={formState.holding_shares}
-                          onChange={(e) => setFormState({ ...formState, holding_shares: e.target.value })}
-                          className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
-                        />
-                        <input
-                          type="number"
-                          step="0.0001"
-                          min="0"
-                          placeholder="Unvested"
-                          value={formState.holding_unvested_shares}
-                          onChange={(e) =>
-                            setFormState({ ...formState, holding_unvested_shares: e.target.value })
-                          }
-                          className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
-                        />
+                          <Plus className="h-3.5 w-3.5" />
+                          Add Another Stock / RSU
+                        </button>
                       </div>
                     )}
+                  </div>
+                )}
+
+              {/* Direct access to Stocks/RSUs when editing an existing Investment / 401k account */}
+              {editingAccount &&
+                (formState.category === 'investment' || formState.category === 'retirement_401k') && (
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-sky-500/25 bg-sky-500/5 p-3.5">
+                    <div className="text-xs">
+                      <div className="font-medium text-sky-200">
+                        Stock & RSU Positions ({(holdingsByAccount.get(editingAccount.id) || []).length})
+                      </div>
+                      <div className="mt-0.5 text-[11px] text-zinc-400">
+                        {(holdingsByAccount.get(editingAccount.id) || []).length > 0
+                          ? (holdingsByAccount.get(editingAccount.id) || [])
+                              .map((h) => `${h.symbol} (${toNumber(h.shares)})`)
+                              .join(', ')
+                          : 'No stock or RSU tickers linked yet.'}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const target = editingAccount;
+                        setFormModalOpen(false);
+                        openHoldingsModal(target);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/15 px-3 py-1.5 text-xs font-semibold text-sky-200 hover:bg-sky-500/25"
+                    >
+                      <Plus className="h-3.5 w-3.5" />
+                      Add / Manage Stocks & RSUs
+                    </button>
                   </div>
                 )}
 
@@ -1958,7 +2072,7 @@ export default function AccountsTab({
                   {holdingsAccount.name} — Stocks & RSUs
                 </h2>
                 <p className="text-xs text-zinc-500">
-                  Live market prices refresh automatically when you open VaultLedger and update this account’s balance.
+                  Live market prices refresh automatically when you open asfinance and update this account’s balance.
                 </p>
               </div>
               <button
@@ -1973,6 +2087,13 @@ export default function AccountsTab({
             {holdingError && (
               <div className="mb-4 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200">
                 {holdingError}
+              </div>
+            )}
+
+            {holdingNotice && (
+              <div className="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-200">
+                <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+                <span>{holdingNotice}</span>
               </div>
             )}
 
@@ -2010,55 +2131,70 @@ export default function AccountsTab({
             </div>
 
             {/* Add New Ticker Form */}
-            <form onSubmit={handleAddHolding} className="mb-5 space-y-2.5 text-xs">
+            <form onSubmit={handleAddHolding} className="mb-5 space-y-2 text-xs">
               <div className="font-semibold text-zinc-300">Add Stock / RSU Grant</div>
-              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-6">
-                <input
-                  type="text"
-                  required
-                  placeholder="Ticker (AAPL)"
-                  value={newSymbol}
-                  onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
-                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
-                />
-                <select
-                  value={newHoldingType}
-                  onChange={(e) => setNewHoldingType(e.target.value)}
-                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 text-zinc-100"
-                >
-                  <option value="rsu">RSU</option>
-                  <option value="stock">Stock</option>
-                  <option value="etf">ETF</option>
-                  <option value="espp">ESPP</option>
-                </select>
-                <input
-                  type="number"
-                  step="0.0001"
-                  min="0"
-                  required
-                  placeholder="Vested Shares"
-                  value={newVestedShares}
-                  onChange={(e) => setNewVestedShares(e.target.value)}
-                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
-                />
-                <input
-                  type="number"
-                  step="0.0001"
-                  min="0"
-                  placeholder="Unvested"
-                  value={newUnvestedShares}
-                  onChange={(e) => setNewUnvestedShares(e.target.value)}
-                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
-                />
-                <input
-                  type="number"
-                  step="0.01"
-                  min="0"
-                  placeholder="Grant/Cost $"
-                  value={newCostBasis}
-                  onChange={(e) => setNewCostBasis(e.target.value)}
-                  className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
-                />
+              <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-6 items-end">
+                <label className="block text-[10px] text-zinc-400">
+                  Ticker *
+                  <input
+                    type="text"
+                    required
+                    placeholder="AAPL"
+                    value={newSymbol}
+                    onChange={(e) => setNewSymbol(e.target.value.toUpperCase())}
+                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
+                  />
+                </label>
+                <label className="block text-[10px] text-zinc-400">
+                  Type
+                  <select
+                    value={newHoldingType}
+                    onChange={(e) => setNewHoldingType(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2 py-2 text-xs text-zinc-100"
+                  >
+                    <option value="stock">Stock</option>
+                    <option value="etf">ETF</option>
+                    <option value="rsu">RSU</option>
+                    <option value="espp">ESPP</option>
+                  </select>
+                </label>
+                <label className="block text-[10px] text-zinc-400">
+                  Vested Shares *
+                  <input
+                    type="number"
+                    step="0.0001"
+                    min="0"
+                    required
+                    placeholder="50"
+                    value={newVestedShares}
+                    onChange={(e) => setNewVestedShares(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
+                  />
+                </label>
+                <label className="block text-[10px] text-zinc-400">
+                  Unvested (opt)
+                  <input
+                    type="number"
+                    step="0.0001"
+                    min="0"
+                    placeholder="0"
+                    value={newUnvestedShares}
+                    onChange={(e) => setNewUnvestedShares(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
+                  />
+                </label>
+                <label className="block text-[10px] text-zinc-400">
+                  Cost/Share (opt)
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    placeholder="0.00"
+                    value={newCostBasis}
+                    onChange={(e) => setNewCostBasis(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-xs text-zinc-100"
+                  />
+                </label>
                 <button
                   type="submit"
                   disabled={savingHolding}
