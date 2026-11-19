@@ -16,6 +16,9 @@ import {
   Save,
   TrendingUp,
   Briefcase,
+  History,
+  Plus,
+  MessageSquare,
 } from 'lucide-react';
 import { formatCurrency, toNumber } from '../lib/finance';
 
@@ -273,6 +276,8 @@ export default function AdvisorTab({
   householdScope,
   householdNames,
   privacyMode,
+  activeThreadId,
+  onChangeActiveThreadId,
   onTaxProfileSaved,
 }) {
   const [selectedModel, setSelectedModel] = useState('gemini-4-hydrogen');
@@ -283,7 +288,14 @@ export default function AdvisorTab({
     error: '',
   });
 
-  // Chat state (stateless in memory — cleared on refresh / New Chat)
+  // Persistent AAL2 Vault Chat History state
+  const [threads, setThreads] = useState([]);
+  const [loadingThreads, setLoadingThreads] = useState(true);
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const userStartedNewChatRef = useRef(false);
+  const skipNextLoadForThreadRef = useRef(null);
+
   const [messages, setMessages] = useState([]);
   const [draftInput, setDraftInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -370,6 +382,92 @@ export default function AdvisorTab({
   useEffect(() => {
     checkAdvisorStatus();
   }, [checkAdvisorStatus]);
+
+  // Load saved AI chat threads under AAL2 RLS on mount & restore active/latest thread
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoadingThreads(true);
+      try {
+        const { data, error } = await supabase
+          .from('advisor_threads')
+          .select('id, title, created_at, updated_at')
+          .order('updated_at', { ascending: false })
+          .limit(50);
+        if (error) throw error;
+        if (cancelled) return;
+
+        const loaded = data || [];
+        setThreads(loaded);
+
+        if (activeThreadId && loaded.some((t) => t.id === activeThreadId)) {
+          // Keep current active thread
+        } else if (!userStartedNewChatRef.current && loaded.length > 0 && onChangeActiveThreadId) {
+          onChangeActiveThreadId(loaded[0].id);
+        }
+      } catch {
+        // Silent thread fetch error; chat still works
+      } finally {
+        if (!cancelled) setLoadingThreads(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // Only run on mount / supabase client change
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [supabase]);
+
+  // Load messages whenever activeThreadId changes
+  useEffect(() => {
+    if (!activeThreadId) {
+      setMessages([]);
+      setLoadingMessages(false);
+      return undefined;
+    }
+
+    if (skipNextLoadForThreadRef.current === activeThreadId) {
+      skipNextLoadForThreadRef.current = null;
+      return undefined;
+    }
+
+    let cancelled = false;
+    (async () => {
+      setLoadingMessages(true);
+      setChatError('');
+      try {
+        const { data, error } = await supabase
+          .from('advisor_messages')
+          .select('id, role, content, model, fallback_note, usage, created_at')
+          .eq('thread_id', activeThreadId)
+          .order('created_at', { ascending: true });
+        if (error) throw error;
+        if (cancelled) return;
+
+        const mapped = (data || []).map((r) => ({
+          id: r.id,
+          role: r.role,
+          text: r.content,
+          model: r.model || '',
+          fallbackNote: r.fallback_note || '',
+          usage: r.usage || null,
+          createdAt: r.created_at,
+        }));
+        setMessages(mapped);
+      } catch (err) {
+        if (!cancelled) {
+          setChatError(err?.message || 'Could not load saved chat messages.');
+        }
+      } finally {
+        if (!cancelled) setLoadingMessages(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeThreadId, supabase]);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -461,7 +559,7 @@ export default function AdvisorTab({
     }
   };
 
-  const sendMessage = async (textToSend) => {
+  const sendMessage = async (textToSend, customTitle = '') => {
     const clean = String(textToSend || '').trim();
     if (!clean || sending) return;
 
@@ -472,13 +570,54 @@ export default function AdvisorTab({
     setSending(true);
 
     try {
+      let threadId = activeThreadId;
+      const nowIso = new Date().toISOString();
+
+      // Create thread row if starting a fresh conversation
+      if (!threadId) {
+        const rawTitle = (customTitle || clean).replace(/\s+/g, ' ').trim();
+        const derivedTitle =
+          rawTitle.length > 65 ? `${rawTitle.slice(0, 62)}…` : rawTitle || 'CFO Conversation';
+        const { data: newThread, error: thErr } = await supabase
+          .from('advisor_threads')
+          .insert({
+            title: derivedTitle,
+            updated_at: nowIso,
+          })
+          .select('id, title, created_at, updated_at')
+          .single();
+        if (thErr) throw thErr;
+
+        threadId = newThread.id;
+        skipNextLoadForThreadRef.current = threadId;
+        userStartedNewChatRef.current = false;
+        if (onChangeActiveThreadId) onChangeActiveThreadId(threadId);
+        setThreads((prev) => [newThread, ...prev]);
+      }
+
+      // Persist user message immediately under AAL2 RLS
+      const { error: uMsgErr } = await supabase.from('advisor_messages').insert({
+        thread_id: threadId,
+        role: 'user',
+        content: clean,
+        model: null,
+        fallback_note: null,
+        usage: null,
+      });
+      if (uMsgErr) throw uMsgErr;
+
+      await supabase
+        .from('advisor_threads')
+        .update({ updated_at: nowIso })
+        .eq('id', threadId);
+
       const { data, error } = await supabase.functions.invoke('finance-advisor', {
         body: {
           action: 'chat',
           model: selectedModel,
           scope: householdScope,
           includeNotes,
-          messages: nextHistory,
+          messages: nextHistory.map((m) => ({ role: m.role, text: m.text })),
         },
       });
       if (error) {
@@ -504,20 +643,83 @@ export default function AdvisorTab({
         throw new Error(data.error || 'Gemini Advisor returned an error.');
       }
 
+      const replyText = data?.reply || 'No response returned.';
+      const usedModel = data?.model || selectedModel;
+      const fallbackNoteText = data?.fallbackNote || '';
+      const replyNowIso = new Date().toISOString();
+
+      const { data: savedAssistantRow } = await supabase
+        .from('advisor_messages')
+        .insert({
+          thread_id: threadId,
+          role: 'assistant',
+          content: replyText,
+          model: usedModel,
+          fallback_note: fallbackNoteText || null,
+          usage: data?.usage || null,
+        })
+        .select('id, created_at')
+        .single();
+
+      await supabase
+        .from('advisor_threads')
+        .update({ updated_at: replyNowIso })
+        .eq('id', threadId);
+
+      setThreads((prev) => {
+        const target = prev.find((t) => t.id === threadId);
+        if (!target) return prev;
+        return [{ ...target, updated_at: replyNowIso }, ...prev.filter((t) => t.id !== threadId)];
+      });
+
       setMessages((prev) => [
         ...prev,
         {
+          id: savedAssistantRow?.id,
           role: 'assistant',
-          text: data?.reply || 'No response returned.',
-          model: data?.model || selectedModel,
-          fallbackNote: data?.fallbackNote || '',
+          text: replyText,
+          model: usedModel,
+          fallbackNote: fallbackNoteText,
           usage: data?.usage || null,
+          createdAt: savedAssistantRow?.created_at || replyNowIso,
         },
       ]);
     } catch (err) {
       setChatError(err?.message || 'Gemini Advisor call failed.');
     } finally {
       setSending(false);
+    }
+  };
+
+  const handleStartNewChat = () => {
+    userStartedNewChatRef.current = true;
+    setMessages([]);
+    setChatError('');
+    setHistoryOpen(false);
+    if (onChangeActiveThreadId) onChangeActiveThreadId(null);
+  };
+
+  const handleSelectThread = (threadId) => {
+    userStartedNewChatRef.current = false;
+    setChatError('');
+    if (onChangeActiveThreadId) onChangeActiveThreadId(threadId);
+    setHistoryOpen(false);
+  };
+
+  const handleDeleteThread = async (e, thread) => {
+    e.stopPropagation();
+    if (!window.confirm(`Delete saved conversation "${thread.title}"?`)) return;
+    await supabase.from('advisor_threads').delete().eq('id', thread.id);
+    const remaining = threads.filter((t) => t.id !== thread.id);
+    setThreads(remaining);
+    if (activeThreadId === thread.id) {
+      if (remaining.length > 0) {
+        if (onChangeActiveThreadId) onChangeActiveThreadId(remaining[0].id);
+      } else {
+        userStartedNewChatRef.current = true;
+        setMessages([]);
+        if (onChangeActiveThreadId) onChangeActiveThreadId(null);
+      }
     }
   };
 
@@ -538,7 +740,7 @@ export default function AdvisorTab({
             <h1 className="text-base font-semibold text-zinc-100">Gemini 4 Family CFO & Tax Advisor</h1>
             <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300">
               <Lock className="h-2.5 w-2.5" />
-              Stateless (store=false)
+              Gemini: store=false
             </span>
             <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-300">
               <ShieldCheck className="h-2.5 w-2.5" />
@@ -1020,6 +1222,10 @@ export default function AdvisorTab({
                 ? `Connected • ${MODELS.find((m) => m.id === selectedModel)?.label}`
                 : 'Awaiting GEMINI_API_KEY secret'}
             </span>
+            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">
+              <ShieldCheck className="h-2.5 w-2.5" />
+              Saved to AAL2 Vault
+            </span>
             <label className="flex cursor-pointer items-center gap-1.5 text-zinc-400 hover:text-zinc-200">
               <input
                 type="checkbox"
@@ -1031,24 +1237,102 @@ export default function AdvisorTab({
             </label>
           </div>
 
-          {messages.length > 0 && (
+          <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => {
-                setMessages([]);
-                setChatError('');
-              }}
-              className="inline-flex items-center gap-1 rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-zinc-400 hover:text-zinc-200"
+              onClick={() => setHistoryOpen(!historyOpen)}
+              className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 transition ${
+                historyOpen
+                  ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-200'
+                  : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700 hover:text-zinc-100'
+              }`}
             >
-              <Trash2 className="h-3 w-3" />
-              New Chat
+              <History className="h-3 w-3" />
+              History ({threads.length})
             </button>
-          )}
+
+            {(messages.length > 0 || activeThreadId) && (
+              <button
+                type="button"
+                onClick={handleStartNewChat}
+                className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 font-medium text-emerald-200 hover:bg-emerald-500/20"
+              >
+                <Plus className="h-3 w-3" />
+                New Chat
+              </button>
+            )}
+          </div>
         </div>
+
+        {/* Collapsible Saved Conversations Drawer */}
+        {historyOpen && (
+          <div className="border-b border-zinc-800/80 bg-zinc-950/90 p-3 text-xs">
+            <div className="mb-2 flex items-center justify-between px-1 text-[11px] text-zinc-400">
+              <span className="font-medium text-zinc-300">
+                Saved Conversations (Protected by 2FA AAL2 RLS • Auto-restored after screen lock)
+              </span>
+              {loadingThreads && <span className="text-zinc-500">Syncing…</span>}
+            </div>
+            {threads.length === 0 ? (
+              <div className="rounded-lg border border-dashed border-zinc-800 py-4 text-center text-[11px] text-zinc-500">
+                No saved conversations yet. Send a message below and it will be saved automatically.
+              </div>
+            ) : (
+              <div className="max-h-56 space-y-1.5 overflow-y-auto pr-1">
+                {threads.map((t) => {
+                  const isActive = t.id === activeThreadId;
+                  return (
+                    <div
+                      key={t.id}
+                      onClick={() => handleSelectThread(t.id)}
+                      className={`group flex cursor-pointer items-center justify-between gap-3 rounded-lg border px-3 py-2 transition ${
+                        isActive
+                          ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-100'
+                          : 'border-zinc-800/80 bg-zinc-900/40 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900/80'
+                      }`}
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <MessageSquare
+                          className={`h-3.5 w-3.5 shrink-0 ${
+                            isActive ? 'text-emerald-400' : 'text-zinc-500'
+                          }`}
+                        />
+                        <span className="truncate font-medium">{t.title}</span>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2.5">
+                        <span className="text-[10px] text-zinc-500">
+                          {new Date(t.updated_at || t.created_at).toLocaleString([], {
+                            month: 'short',
+                            day: 'numeric',
+                            hour: 'numeric',
+                            minute: '2-digit',
+                          })}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={(e) => handleDeleteThread(e, t)}
+                          title="Delete conversation"
+                          className="rounded p-1 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-400"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Messages Feed */}
         <div className="min-h-[380px] max-h-[62vh] overflow-y-auto p-5 space-y-4">
-          {messages.length === 0 ? (
+          {loadingMessages ? (
+            <div className="flex items-center justify-center py-20 text-xs text-zinc-400">
+              <div className="mr-2.5 h-4 w-4 animate-spin rounded-full border-2 border-zinc-700 border-t-emerald-400" />
+              Restoring saved conversation from AAL2 Vault…
+            </div>
+          ) : messages.length === 0 ? (
             <div className="space-y-4">
               <div className="text-center py-4">
                 <div className="mx-auto mb-2.5 flex h-11 w-11 items-center justify-center rounded-2xl border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
@@ -1068,7 +1352,7 @@ export default function AdvisorTab({
                     key={q.title}
                     type="button"
                     disabled={!advisorStatus.configured || sending}
-                    onClick={() => sendMessage(q.prompt)}
+                    onClick={() => sendMessage(q.prompt, q.title)}
                     className="group rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 text-left transition hover:border-emerald-500/40 hover:bg-zinc-900/80 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <div className="text-xs font-semibold text-zinc-200 group-hover:text-emerald-300">

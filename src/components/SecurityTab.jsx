@@ -249,6 +249,7 @@ export default function SecurityTab({
     await supabase.from('balance_snapshots').delete().neq('id', 0);
     await supabase.from('accounts').delete().neq('id', 0);
     await supabase.from('monthly_budgets').delete().neq('id', 0);
+    await supabase.from('advisor_threads').delete().neq('id', 0);
     await onDataChanged();
   };
 

@@ -169,6 +169,7 @@ function AuthenticatedVault({
   const [equityHoldings, setEquityHoldings] = useState([]);
   const [creditCardPromos, setCreditCardPromos] = useState([]);
   const [taxProfile, setTaxProfile] = useState(null);
+  const [activeAdvisorThreadId, setActiveAdvisorThreadId] = useState(null);
 
   const [loadingData, setLoadingData] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -846,6 +847,8 @@ function AuthenticatedVault({
                 householdScope={householdScope}
                 householdNames={householdNames}
                 privacyMode={privacyMode}
+                activeThreadId={activeAdvisorThreadId}
+                onChangeActiveThreadId={setActiveAdvisorThreadId}
                 onTaxProfileSaved={() => loadAllData()}
               />
             )}
