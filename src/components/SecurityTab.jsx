@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ShieldCheck,
   Smartphone,
@@ -10,8 +10,16 @@ import {
   AlertCircle,
   Copy,
   Check,
+  Fingerprint,
+  Timer,
 } from 'lucide-react';
 import { todayIsoDate } from '../lib/finance';
+import {
+  getSavedBiometricCredential,
+  isPlatformBiometricSupported,
+  registerDeviceBiometric,
+  removeSavedBiometricCredential,
+} from '../lib/screenLock';
 
 export default function SecurityTab({
   supabase,
@@ -28,8 +36,57 @@ export default function SecurityTab({
   equityHoldings,
   creditCardPromos,
   householdNames,
+  lockSettings,
+  onUpdateLockSettings,
+  onLockNow,
   onDataChanged,
 }) {
+  // Touch ID / Biometrics state
+  const [biometricSupported, setBiometricSupported] = useState(false);
+  const [savedBiometric, setSavedBiometric] = useState(null);
+  const [bioBusy, setBioBusy] = useState(false);
+  const [bioError, setBioError] = useState('');
+  const [bioNotice, setBioNotice] = useState('');
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      const supported = await isPlatformBiometricSupported();
+      const saved = getSavedBiometricCredential(session?.user?.id);
+      if (mounted) {
+        setBiometricSupported(supported);
+        setSavedBiometric(saved);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [session?.user?.id]);
+
+  const handleEnableTouchId = async () => {
+    setBioError('');
+    setBioNotice('');
+    setBioBusy(true);
+    try {
+      const cred = await registerDeviceBiometric(session?.user);
+      setSavedBiometric(cred);
+      setBioNotice('MacBook Touch ID / device biometrics enabled! Click "Lock Screen Now" to test.');
+    } catch (err) {
+      if (err?.name === 'NotAllowedError') {
+        setBioError('Touch ID prompt was cancelled or timed out.');
+      } else {
+        setBioError(err?.message || 'Could not enroll Touch ID on this browser.');
+      }
+    } finally {
+      setBioBusy(false);
+    }
+  };
+
+  const handleRemoveTouchId = () => {
+    removeSavedBiometricCredential();
+    setSavedBiometric(null);
+    setBioNotice('Device Touch ID removed. Password unlock remains active.');
+  };
   // TOTP Enrollment state
   const [enrolling, setEnrolling] = useState(false);
   const [pendingFactor, setPendingFactor] = useState(null);
@@ -242,6 +299,169 @@ export default function SecurityTab({
             <div className="text-zinc-400">External Bank Links</div>
             <div className="mt-1 font-semibold text-emerald-400">Zero (Air-Gapped)</div>
             <div className="mt-1 text-[11px] text-zinc-500">No Plaid / Finicity credentials</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Auto-Lock & MacBook Touch ID Section */}
+      <div className="rounded-xl border border-zinc-800/90 bg-zinc-950/80 p-6">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <Fingerprint className="h-5 w-5 text-emerald-400" />
+            <div>
+              <h3 className="text-sm font-semibold text-zinc-100">
+                Inactivity Auto-Lock &amp; MacBook Touch ID
+              </h3>
+              <p className="text-xs text-zinc-500">
+                Automatically hides and unmounts all balances after inactivity (or laptop sleep), unlocking via Touch ID fingerprint or master password.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={onLockNow}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 text-xs font-medium text-amber-200 hover:bg-amber-500/25"
+          >
+            <Lock className="h-3.5 w-3.5" />
+            Lock Screen Now (⌘⇧L)
+          </button>
+        </div>
+
+        {bioError && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200">
+            <AlertCircle className="h-4 w-4 shrink-0 text-rose-400" />
+            <span>{bioError}</span>
+          </div>
+        )}
+
+        {bioNotice && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-200">
+            <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-400" />
+            <span>{bioNotice}</span>
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 text-xs">
+          {/* Inactivity Timeout & Tab-Hide Settings */}
+          <div className="space-y-4 rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+            <div>
+              <div className="mb-2 flex items-center gap-1.5 font-medium text-zinc-200">
+                <Timer className="h-3.5 w-3.5 text-emerald-400" />
+                Auto-Lock After Inactivity
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {[
+                  { mins: 1, label: '1 min' },
+                  { mins: 2, label: '2 min' },
+                  { mins: 5, label: '5 min' },
+                  { mins: 10, label: '10 min' },
+                  { mins: 15, label: '15 min' },
+                  { mins: 30, label: '30 min' },
+                  { mins: 0, label: 'Off' },
+                ].map((opt) => {
+                  const active = (lockSettings?.timeoutMinutes ?? 5) === opt.mins;
+                  return (
+                    <button
+                      key={opt.mins}
+                      type="button"
+                      onClick={() =>
+                        onUpdateLockSettings({
+                          ...(lockSettings || {}),
+                          timeoutMinutes: opt.mins,
+                        })
+                      }
+                      className={`rounded-lg border px-2.5 py-1.5 font-medium transition ${
+                        active
+                          ? 'border-emerald-500/50 bg-emerald-500/15 text-emerald-200'
+                          : 'border-zinc-800 bg-zinc-950 text-zinc-400 hover:text-zinc-200'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <label className="flex cursor-pointer items-start gap-2.5 border-t border-zinc-800/80 pt-3 text-zinc-300">
+              <input
+                type="checkbox"
+                checked={Boolean(lockSettings?.lockOnTabHide)}
+                onChange={(e) =>
+                  onUpdateLockSettings({
+                    ...(lockSettings || {}),
+                    lockOnTabHide: e.target.checked,
+                  })
+                }
+                className="mt-0.5 rounded border-zinc-700 bg-zinc-950 text-emerald-500"
+              />
+              <span>
+                <strong className="block text-zinc-200">Lock immediately when switching tabs or minimizing</strong>
+                <span className="text-[11px] text-zinc-500">
+                  Great for public spaces — hides balances the instant you leave this tab.
+                </span>
+              </span>
+            </label>
+          </div>
+
+          {/* MacBook Touch ID / Platform Biometrics Enrollment */}
+          <div className="flex flex-col justify-between rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+            <div>
+              <div className="flex items-center justify-between">
+                <span className="font-medium text-zinc-200">MacBook Touch ID / Face ID Unlock</span>
+                {savedBiometric ? (
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                    Active on this browser
+                  </span>
+                ) : (
+                  <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-400">
+                    Not enrolled
+                  </span>
+                )}
+              </div>
+              <p className="mt-1.5 text-[11px] leading-relaxed text-zinc-400">
+                Uses your device’s built-in WebAuthn Secure Enclave (Touch ID on MacBook, Face ID on iPhone) so you can unlock the screen with one fingerprint touch instead of typing your password.
+              </p>
+            </div>
+
+            <div className="mt-4 flex flex-wrap items-center gap-2">
+              {biometricSupported ? (
+                savedBiometric ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={bioBusy}
+                      onClick={handleEnableTouchId}
+                      className="rounded-lg border border-zinc-700 bg-zinc-900 px-3 py-1.5 font-medium text-zinc-200 hover:bg-zinc-800"
+                    >
+                      Re-register Touch ID
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleRemoveTouchId}
+                      className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-1.5 font-medium text-rose-300 hover:bg-rose-500/20"
+                    >
+                      Remove Touch ID
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={bioBusy}
+                    onClick={handleEnableTouchId}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-3.5 py-2 font-semibold text-zinc-950 hover:bg-emerald-400 disabled:opacity-50"
+                  >
+                    <Fingerprint className="h-4 w-4" />
+                    {bioBusy ? 'Waiting for Fingerprint…' : 'Enable MacBook Touch ID Unlock'}
+                  </button>
+                )
+              ) : (
+                <span className="text-[11px] text-zinc-500">
+                  No platform biometric sensor detected in this browser (Master Password unlock is active).
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </div>

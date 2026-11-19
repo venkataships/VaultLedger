@@ -22,7 +22,14 @@ import {
   todayIsoDate,
   toNumber,
 } from './lib/finance';
+import {
+  isPersistedScreenLocked,
+  loadLockSettings,
+  saveLockSettings,
+  setPersistedScreenLocked,
+} from './lib/screenLock';
 import AuthVaultGate from './components/AuthVaultGate';
+import VaultLockScreen from './components/VaultLockScreen';
 import OverviewTab from './components/OverviewTab';
 import AccountsTab from './components/AccountsTab';
 import ExpensesTab from './components/ExpensesTab';
@@ -39,6 +46,100 @@ function AuthenticatedVault({
   const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'accounts' | 'expenses' | 'security'
   const [accountCategoryFilter, setAccountCategoryFilter] = useState('all');
   const [privacyMode, setPrivacyMode] = useState(false);
+
+  // Auto-Lock & Screen Lock state (persists across Cmd+R refresh)
+  const [lockSettings, setLockSettings] = useState(() => loadLockSettings());
+  const [isScreenLocked, setIsScreenLocked] = useState(() => isPersistedScreenLocked());
+  const [lockReason, setLockReason] = useState(() =>
+    isPersistedScreenLocked() ? 'Vault screen remained locked across refresh.' : ''
+  );
+  const lastActivityAtRef = useRef(Date.now());
+
+  const triggerScreenLock = useCallback((reason = 'Locked automatically due to inactivity.') => {
+    setPersistedScreenLocked(true);
+    setLockReason(reason);
+    setIsScreenLocked(true);
+  }, []);
+
+  const handleUnlockScreen = useCallback(() => {
+    lastActivityAtRef.current = Date.now();
+    setPersistedScreenLocked(false);
+    setLockReason('');
+    setIsScreenLocked(false);
+  }, []);
+
+  const handleUpdateLockSettings = useCallback((nextSettings) => {
+    const saved = saveLockSettings(nextSettings);
+    setLockSettings(saved);
+    lastActivityAtRef.current = Date.now();
+  }, []);
+
+  const handleFullSignOut = useCallback(() => {
+    setPersistedScreenLocked(false);
+    onSignOut();
+  }, [onSignOut]);
+
+  // Inactivity timer, wake-from-sleep wall-clock check, optional tab-hide lock, and Cmd+Shift+L shortcut
+  useEffect(() => {
+    if (isScreenLocked) return undefined;
+
+    lastActivityAtRef.current = Date.now();
+    let lastTouchWrite = 0;
+
+    const recordActivity = () => {
+      const now = Date.now();
+      if (now - lastTouchWrite >= 1000) {
+        lastTouchWrite = now;
+        lastActivityAtRef.current = now;
+      }
+    };
+
+    const checkIdle = () => {
+      const mins = Number(lockSettings.timeoutMinutes);
+      if (mins > 0 && Date.now() - lastActivityAtRef.current >= mins * 60 * 1000) {
+        triggerScreenLock(`Locked after ${mins} minute${mins === 1 ? '' : 's'} of inactivity.`);
+      }
+    };
+
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        if (lockSettings.lockOnTabHide) {
+          triggerScreenLock('Locked automatically when tab was hidden.');
+        }
+      } else {
+        checkIdle();
+      }
+    };
+
+    const handleKeyDown = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
+        e.preventDefault();
+        triggerScreenLock('Locked via keyboard shortcut (⌘⇧L).');
+        return;
+      }
+      recordActivity();
+    };
+
+    const activityEvents = ['mousemove', 'mousedown', 'touchstart', 'scroll'];
+    for (const ev of activityEvents) {
+      window.addEventListener(ev, recordActivity, { passive: true });
+    }
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('focus', checkIdle);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    const intervalId = window.setInterval(checkIdle, 5000);
+
+    return () => {
+      for (const ev of activityEvents) {
+        window.removeEventListener(ev, recordActivity);
+      }
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('focus', checkIdle);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      window.clearInterval(intervalId);
+    };
+  }, [isScreenLocked, lockSettings.timeoutMinutes, lockSettings.lockOnTabHide, triggerScreenLock]);
 
   // Household view scope ('combined' | 'primary' | 'spouse' | 'joint')
   const [householdScope, setHouseholdScope] = useState('combined');
@@ -405,6 +506,18 @@ function AuthenticatedVault({
     ...(hasJointItems ? [{ key: 'joint', label: 'Joint' }] : []),
   ];
 
+  // When locked, unmount all financial DOM completely and render only the lock screen
+  if (isScreenLocked) {
+    return (
+      <VaultLockScreen
+        user={session?.user}
+        lockReason={lockReason}
+        onUnlock={handleUnlockScreen}
+        onFullSignOut={handleFullSignOut}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-100">
       {/* Top Sticky Command Header */}
@@ -553,12 +666,21 @@ function AuthenticatedVault({
 
             <button
               type="button"
-              onClick={onSignOut}
-              title="Lock & Sign Out"
-              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-400 hover:border-rose-500/40 hover:text-rose-300"
+              onClick={() => triggerScreenLock('Manually locked.')}
+              title="Lock Screen (⌘⇧L) — Unlock with Touch ID or Password"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-amber-500/40 hover:text-amber-300"
+            >
+              <Lock className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Lock</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleFullSignOut}
+              title="Full Sign Out (Require 2FA on next login)"
+              className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 p-1.5 text-xs text-zinc-500 hover:border-rose-500/40 hover:text-rose-300"
             >
               <LogOut className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Lock</span>
             </button>
           </div>
         </div>
@@ -676,6 +798,10 @@ function AuthenticatedVault({
                 equityHoldings={equityHoldings}
                 creditCardPromos={creditCardPromos}
                 householdNames={householdNames}
+                lockSettings={lockSettings}
+                onUpdateLockSettings={handleUpdateLockSettings}
+                onLockNow={() => triggerScreenLock('Manually locked to test screen lock.')}
+                onFullSignOut={handleFullSignOut}
                 onDataChanged={() => loadAllData()}
               />
             )}
