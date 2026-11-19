@@ -21,28 +21,28 @@ import { formatCurrency, toNumber } from '../lib/finance';
 
 const MODELS = [
   {
-    id: 'gemini-4-neon',
-    label: 'Gemini 4 Neon',
-    badge: 'Flagship • Paid',
-    desc: 'Newest Gemini 4 reasoning model (requires Paid Tier billing; auto-falls back to Hydrogen on Free Tier)',
-  },
-  {
-    id: 'gemini-4-argon',
-    label: 'Gemini 4 Argon',
-    badge: 'Balanced • Paid',
-    desc: 'Efficient frontier reasoning (requires Paid Tier billing)',
-  },
-  {
     id: 'gemini-4-hydrogen',
     label: 'Gemini 4 Hydrogen',
-    badge: 'Free Tier',
-    desc: 'Fast Gemini 4 model — works on Free Tier & Paid Tier',
+    badge: 'Default • Free',
+    desc: 'Best Free-Tier Gemini 4 reasoning (20 req/day; auto-falls back if busy)',
+  },
+  {
+    id: 'gemini-3.8-flash',
+    label: 'Gemini 3.8 Flash',
+    badge: 'Fast • Free',
+    desc: 'Fast Gemini 3.8 model on Free Tier (20 req/day)',
   },
   {
     id: 'gemini-3.5-flash-lite',
     label: '3.5 Flash-Lite',
-    badge: 'Lite • Free',
-    desc: 'Ultra-fast lightweight model on Free Tier',
+    badge: '500/day • Free',
+    desc: 'High-quota fast model on Free Tier (500 req/day)',
+  },
+  {
+    id: 'gemma-4-31b-it',
+    label: 'Gemma 4 31B',
+    badge: 'Backup • Free',
+    desc: 'Ultra-high-quota open model on Free Tier (14K req/day)',
   },
 ];
 
@@ -275,7 +275,7 @@ export default function AdvisorTab({
   privacyMode,
   onTaxProfileSaved,
 }) {
-  const [selectedModel, setSelectedModel] = useState('gemini-4-neon');
+  const [selectedModel, setSelectedModel] = useState('gemini-4-hydrogen');
   const [includeNotes, setIncludeNotes] = useState(false);
   const [advisorStatus, setAdvisorStatus] = useState({
     checking: true,
@@ -1134,9 +1134,9 @@ export default function AdvisorTab({
           )}
 
           {chatError && (
-            <div className="flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200">
-              <AlertTriangle className="h-4 w-4 shrink-0 text-rose-400" />
-              <span>{chatError}</span>
+            <div className="flex items-start gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-xs text-rose-200">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+              <span className="whitespace-pre-wrap">{chatError}</span>
             </div>
           )}
 

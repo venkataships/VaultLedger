@@ -10,28 +10,34 @@ const corsHeaders = {
 
 const ALLOWED_MODELS = [
   {
-    id: 'gemini-4-neon',
-    label: 'Gemini 4 Neon',
-    badge: 'Flagship • Paid Tier',
-    description: 'Newest Gemini 4 reasoning model (requires Paid Tier billing in Google AI Studio)',
-  },
-  {
-    id: 'gemini-4-argon',
-    label: 'Gemini 4 Argon',
-    badge: 'Balanced • Paid Tier',
-    description: 'Efficient frontier reasoning (requires Paid Tier billing in Google AI Studio)',
-  },
-  {
     id: 'gemini-4-hydrogen',
     label: 'Gemini 4 Hydrogen',
-    badge: 'Free Tier',
-    description: 'Gemini 4 workhorse model — works on both Free Tier and Paid Tier',
+    badge: 'Free • 20/day',
+    description: 'Gemini 4 workhorse reasoning model — default Free Tier model',
+  },
+  {
+    id: 'gemini-3.8-flash',
+    label: 'Gemini 3.8 Flash',
+    badge: 'Free • 20/day',
+    description: 'Fast Gemini 3.8 Flash model on Free Tier',
   },
   {
     id: 'gemini-3.5-flash-lite',
     label: 'Gemini 3.5 Flash-Lite',
-    badge: 'Ultra-Fast • Free',
-    description: 'Fastest lightweight model for quick balance & spending Q&A',
+    badge: 'Free • 500/day',
+    description: 'High-quota fast workhorse on Free Tier (500 req/day)',
+  },
+  {
+    id: 'gemini-3.1-flash-lite',
+    label: 'Gemini 3.1 Flash-Lite',
+    badge: 'Free • 500/day',
+    description: 'Secondary high-quota fast fallback on Free Tier (500 req/day)',
+  },
+  {
+    id: 'gemma-4-31b-it',
+    label: 'Gemma 4 31B',
+    badge: 'Free • 14.4K/day',
+    description: 'Open 31B backup model with ultra-high Free Tier quota (14.4K req/day)',
   },
 ] as const;
 
@@ -400,7 +406,7 @@ Deno.serve(async (req: Request) => {
     if (body?.action === 'status') {
       return jsonResp({
         configured: Boolean(apiKey),
-        defaultModel: 'gemini-4-neon',
+        defaultModel: 'gemini-4-hydrogen',
         models: ALLOWED_MODELS,
       });
     }
@@ -427,8 +433,8 @@ Deno.serve(async (req: Request) => {
       return jsonResp({ error: 'Please send at least one message.' }, 400);
     }
 
-    const requestedModel = String(body?.model || 'gemini-4-neon');
-    const model = ALLOWED_MODEL_IDS.has(requestedModel) ? requestedModel : 'gemini-4-neon';
+    const requestedModel = String(body?.model || 'gemini-4-hydrogen');
+    const model = ALLOWED_MODEL_IDS.has(requestedModel) ? requestedModel : 'gemini-4-hydrogen';
     const scope = String(body?.scope || 'combined');
     const includeNotes = Boolean(body?.includeNotes);
 
@@ -491,43 +497,46 @@ Deno.serve(async (req: Request) => {
           system_instruction: systemInstruction,
           input: steps,
         },
-        { maxRetries: 0, timeout: 45000 }
+        { maxRetries: 0, timeout: 25000 }
       );
     };
 
     let interaction;
     let usedModel = model;
     let fallbackNote = '';
+    const attempts: Array<{ model: string; error: string }> = [];
 
     try {
       interaction = await callModel(model);
     } catch (primaryErr) {
       const primaryMsg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
       console.error(`[finance-advisor] Primary model ${model} failed:`, primaryMsg);
+      attempts.push({ model, error: primaryMsg });
 
-      const isQuotaOrAccess =
-        /429|RESOURCE_EXHAUSTED|quota|limit:\s*0|billing|not found|404|permission|403|overloaded|503/i.test(
+      const shouldFallback =
+        /429|500|502|503|504|RESOURCE_EXHAUSTED|quota|limit:\s*0|high demand|overloaded|timeout|timed out|AbortError|not found|404|permission|403/i.test(
           primaryMsg
         );
 
-      // If a Paid-Tier model (Neon/Argon) hits Free-Tier quota/access limit, fall back cleanly to Free-Tier Gemini 4 Hydrogen
-      const fallbackChain = ['gemini-4-hydrogen', 'gemini-3.5-flash-lite'].filter(
-        (m) => m !== model
-      );
+      const fallbackChain = [
+        'gemini-4-hydrogen',
+        'gemini-3.8-flash',
+        'gemini-3.5-flash-lite',
+        'gemini-3.1-flash-lite',
+        'gemma-4-31b-it',
+      ].filter((m) => m !== model);
 
-      if (isQuotaOrAccess && fallbackChain.length > 0) {
-        let lastFallbackErr = primaryMsg;
+      if (shouldFallback && fallbackChain.length > 0) {
         for (const fbModel of fallbackChain) {
           try {
             interaction = await callModel(fbModel);
             usedModel = fbModel;
-            fallbackNote =
-              `${model} returned a quota/tier error on your Google AI Studio key (paid-tier models require billing enabled). ` +
-              `Answered automatically using ${fbModel}.`;
+            fallbackNote = `${model} was temporarily unavailable or busy. Answered automatically using ${fbModel}.`;
             break;
           } catch (fbErr) {
-            lastFallbackErr = fbErr instanceof Error ? fbErr.message : String(fbErr);
-            console.error(`[finance-advisor] Fallback model ${fbModel} failed:`, lastFallbackErr);
+            const fbMsg = fbErr instanceof Error ? fbErr.message : String(fbErr);
+            console.error(`[finance-advisor] Fallback model ${fbModel} failed:`, fbMsg);
+            attempts.push({ model: fbModel, error: fbMsg });
           }
         }
 
@@ -535,7 +544,9 @@ Deno.serve(async (req: Request) => {
           return jsonResp({
             configured: true,
             ok: false,
-            error: `Gemini API error (${model}): ${primaryMsg}`,
+            error:
+              'All free-tier models are currently unavailable or busy:\n' +
+              attempts.map((a) => `• ${a.model}: ${a.error}`).join('\n'),
           });
         }
       } else {
