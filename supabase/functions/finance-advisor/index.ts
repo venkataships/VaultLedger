@@ -101,6 +101,18 @@ async function callAnthropicModel(
     content: [{ type: 'text', text: m.text }],
   }));
 
+  const isClaude55 = targetModel.includes('-5-5');
+  const reqPayload: Record<string, unknown> = {
+    model: targetModel,
+    max_tokens: isClaude55 ? 16384 : 8192,
+    system: [{ type: 'text', text: systemInstruction }],
+    messages: anthropicMessages,
+  };
+  if (isClaude55) {
+    reqPayload.thinking = { type: 'adaptive' };
+    reqPayload.output_config = { effort: 'medium' };
+  }
+
   const resp = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -108,13 +120,8 @@ async function callAnthropicModel(
       'x-api-key': apiKey,
       'anthropic-version': '2026-10-21',
     },
-    body: JSON.stringify({
-      model: targetModel,
-      max_tokens: 4096,
-      system: [{ type: 'text', text: systemInstruction }],
-      messages: anthropicMessages,
-    }),
-    signal: AbortSignal.timeout(40000),
+    body: JSON.stringify(reqPayload),
+    signal: AbortSignal.timeout(55000),
   });
 
   const json = await resp.json().catch(() => ({}));
@@ -138,6 +145,24 @@ async function callAnthropicModel(
   const rawUsage = (json as { usage?: Record<string, unknown> })?.usage || {};
   const inputTokens = Number(rawUsage.input_net_tokens ?? rawUsage.input_tokens ?? 0);
   const outputTokens = Number(rawUsage.output_tokens ?? 0);
+
+  if (!replyText) {
+    const stopReason = (json as { stop_reason?: string })?.stop_reason;
+    console.warn(
+      '[finance-advisor] Empty Anthropic text:',
+      JSON.stringify({
+        model: targetModel,
+        stop_reason: stopReason,
+        blockTypes: contentBlocks.map((b) => b?.type),
+        usage: rawUsage,
+      })
+    );
+    if (stopReason === 'max_tokens') {
+      throw new Error(
+        `Claude (${targetModel}) hit max_tokens (${reqPayload.max_tokens}) during internal reasoning before emitting a final response. Please retry.`
+      );
+    }
+  }
 
   return {
     reply: replyText,
@@ -465,7 +490,7 @@ function buildSanitizedFinancialContext(params: {
   };
 
   return {
-    jsonContext: JSON.stringify(summaryBlock, null, 2),
+    jsonContext: JSON.stringify(summaryBlock),
     stats: {
       accountCount: activeAccounts.length,
       holdingCount: sanitizedHoldings.length,
