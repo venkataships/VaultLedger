@@ -13,9 +13,13 @@ import {
   History,
   Plus,
   MessageSquare,
+  ArrowUpRight,
 } from 'lucide-react';
-import { toNumber } from '../lib/finance';
-import PaystubProfileCard from './PaystubProfileCard';
+import {
+  computeHouseholdPaystubSummary,
+  formatCurrency,
+  toNumber,
+} from '../lib/finance';
 
 const MODELS = [
   {
@@ -256,17 +260,15 @@ function FormattedReply({ text }) {
 
 export default function AdvisorTab({
   supabase,
-  session,
   accounts,
   equityHoldings,
   taxProfile,
-  budgets,
   householdScope,
   householdNames,
   privacyMode,
   activeThreadId,
   onChangeActiveThreadId,
-  onTaxProfileSaved,
+  onOpenPayTab,
 }) {
   const [selectedModel, setSelectedModel] = useState('claude-haiku-5-5');
   const [includeNotes, setIncludeNotes] = useState(false);
@@ -410,6 +412,13 @@ export default function AdvisorTab({
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, sending]);
+
+  const mask = (str) => (privacyMode ? '••••••' : str);
+
+  const paySummary = useMemo(
+    () => (taxProfile ? computeHouseholdPaystubSummary(taxProfile, householdNames) : null),
+    [taxProfile, householdNames]
+  );
 
   const ccEligibleLots = useMemo(() => {
     const activeIds = new Set((accounts || []).filter((a) => !a.is_archived).map((a) => a.id));
@@ -759,17 +768,68 @@ export default function AdvisorTab({
         </div>
       )}
 
-      {/* Collapsible Zero-PII Paystub & Tax Engine */}
-      <PaystubProfileCard
-        supabase={supabase}
-        session={session}
-        taxProfile={taxProfile}
-        budgets={budgets}
-        householdNames={householdNames}
-        ccEligibleLots={ccEligibleLots}
-        privacyMode={privacyMode}
-        onTaxProfileSaved={onTaxProfileSaved}
-      />
+      {/* Read-Only Paystub & Portfolio Context Strip */}
+      <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-zinc-800/80 bg-zinc-950/70 px-4 py-2.5 text-[11px]">
+        <div className="flex flex-wrap items-center gap-2">
+          {paySummary && paySummary.combinedTotalCompWithBenefits > 0 ? (
+            <>
+              <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-emerald-300 tabular-nums">
+                Total Comp: {mask(formatCurrency(paySummary.combinedTotalCompWithBenefits, { decimals: 0 }))}/yr
+              </span>
+              {paySummary.hasAnyTaxWithholding && paySummary.combinedAvgMonthlyNetBase > 0 && (
+                <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-0.5 font-mono text-sky-300 tabular-nums">
+                  Net Base: {mask(formatCurrency(paySummary.combinedAvgMonthlyNetBase, { decimals: 0 }))}/mo
+                </span>
+              )}
+              {paySummary.fedTax.marginalRatePct > 0 && (
+                <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2.5 py-0.5 font-mono text-violet-300 tabular-nums">
+                  Est. {paySummary.fedTax.marginalRatePct}% Fed
+                </span>
+              )}
+              {(() => {
+                const warnAlerts = paySummary.alerts.filter((a) => a.level !== 'info');
+                if (warnAlerts.length === 0) return null;
+                const hasDanger = warnAlerts.some((a) => a.level === 'danger');
+                return (
+                  <span
+                    className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-medium ${
+                      hasDanger
+                        ? 'border-rose-500/35 bg-rose-500/10 text-rose-200'
+                        : 'border-amber-500/35 bg-amber-500/10 text-amber-200'
+                    }`}
+                  >
+                    <AlertTriangle className="h-3 w-3" />
+                    {warnAlerts.length} Paystub Alert{warnAlerts.length === 1 ? '' : 's'}
+                  </span>
+                );
+              })()}
+            </>
+          ) : (
+            <span className="rounded-full border border-zinc-800 bg-zinc-900 px-2.5 py-0.5 text-zinc-400">
+              Paystub & Tax Profile not set yet — add it for exact bracket & deduction math
+            </span>
+          )}
+
+          {ccEligibleLots.length > 0 && (
+            <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-0.5 font-mono text-[10px] text-sky-300">
+              CC-Eligible: {ccEligibleLots.map((l) => `${l.symbol} (${l.contracts}x)`).join(', ')}
+            </span>
+          )}
+        </div>
+
+        {onOpenPayTab && (
+          <button
+            type="button"
+            onClick={onOpenPayTab}
+            className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900/80 px-2.5 py-1 font-medium text-zinc-200 hover:border-emerald-500/40 hover:text-emerald-200"
+          >
+            {paySummary && paySummary.combinedTotalCompWithBenefits > 0
+              ? 'Edit Pay & Taxes'
+              : 'Set Up Pay & Taxes'}
+            <ArrowUpRight className="h-3 w-3" />
+          </button>
+        )}
+      </div>
 
       {/* Main Gemini Chat Console */}
       <div className="flex flex-col overflow-hidden rounded-xl border border-zinc-800/90 bg-zinc-950/80">
@@ -894,7 +954,7 @@ export default function AdvisorTab({
         )}
 
         {/* Messages Feed */}
-        <div className="min-h-[380px] max-h-[62vh] overflow-y-auto p-5 space-y-4">
+        <div className="min-h-[440px] max-h-[68vh] overflow-y-auto p-5 space-y-4">
           {loadingMessages ? (
             <div className="flex items-center justify-center py-20 text-xs text-zinc-400">
               <div className="mr-2.5 h-4 w-4 animate-spin rounded-full border-2 border-zinc-700 border-t-emerald-400" />

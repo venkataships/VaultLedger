@@ -15,6 +15,7 @@ import {
   X,
   Check,
   Sparkles,
+  Briefcase,
 } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import { seedDemoVaultData } from './lib/demoSeed';
@@ -37,6 +38,7 @@ import OverviewTab from './components/OverviewTab';
 import AccountsTab from './components/AccountsTab';
 import ExpensesTab from './components/ExpensesTab';
 import AdvisorTab from './components/AdvisorTab';
+import PaystubProfileCard from './components/PaystubProfileCard';
 import SecurityTab from './components/SecurityTab';
 
 function AuthenticatedVault({
@@ -547,10 +549,11 @@ function AuthenticatedVault({
 
   const navItems = [
     { key: 'overview', label: 'Overview', icon: LayoutDashboard },
-    { key: 'accounts', label: 'Accounts & Debt', icon: Wallet },
-    { key: 'expenses', label: 'Monthly Expenses', icon: Receipt },
+    { key: 'accounts', label: 'Accounts', icon: Wallet },
+    { key: 'income', label: 'Pay & Taxes', icon: Briefcase },
+    { key: 'expenses', label: 'Expenses', icon: Receipt },
     { key: 'advisor', label: 'AI Advisor', icon: Sparkles },
-    { key: 'security', label: 'Security & 2FA', icon: Lock },
+    { key: 'security', label: 'Security', icon: Lock },
   ];
 
   const scopeOptions = [
@@ -632,7 +635,7 @@ function AuthenticatedVault({
 
           <div className="flex flex-wrap items-center gap-2">
             {/* Household Scope Switcher */}
-            {activeTab !== 'security' && (
+            {activeTab !== 'security' && activeTab !== 'income' && (
               <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 p-0.5 text-[11px]">
                 <Users className="ml-1.5 mr-0.5 hidden h-3.5 w-3.5 text-zinc-500 sm:inline" />
                 {scopeOptions.map((opt) => (
@@ -823,6 +826,20 @@ function AuthenticatedVault({
               />
             )}
 
+            {activeTab === 'income' && (
+              <PaystubProfileCard
+                standalone
+                supabase={supabase}
+                session={session}
+                taxProfile={taxProfile}
+                budgets={budgets}
+                householdNames={householdNames}
+                privacyMode={privacyMode}
+                onTaxProfileSaved={() => loadAllData()}
+                onOpenAdvisor={() => setActiveTab('advisor')}
+              />
+            )}
+
             {activeTab === 'expenses' && (
               <ExpensesTab
                 supabase={supabase}
@@ -840,17 +857,15 @@ function AuthenticatedVault({
             {activeTab === 'advisor' && (
               <AdvisorTab
                 supabase={supabase}
-                session={session}
                 accounts={accounts}
                 equityHoldings={equityHoldings}
                 taxProfile={taxProfile}
-                budgets={budgets}
                 householdScope={householdScope}
                 householdNames={householdNames}
                 privacyMode={privacyMode}
                 activeThreadId={activeAdvisorThreadId}
                 onChangeActiveThreadId={setActiveAdvisorThreadId}
-                onTaxProfileSaved={() => loadAllData()}
+                onOpenPayTab={() => setActiveTab('income')}
               />
             )}
 

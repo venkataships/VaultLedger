@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowRightLeft,
+  ArrowUpRight,
   Briefcase,
   Calculator,
   CheckCircle2,
@@ -580,9 +581,11 @@ export default function PaystubProfileCard({
   taxProfile,
   budgets,
   householdNames,
-  ccEligibleLots,
+  ccEligibleLots = [],
   privacyMode,
   onTaxProfileSaved,
+  standalone = false,
+  onOpenAdvisor,
 }) {
   const [profileOpen, setProfileOpen] = useState(
     !taxProfile ||
@@ -745,66 +748,104 @@ export default function PaystubProfileCard({
     },
   ];
 
+  const summaryPills = (
+    <>
+      {summary.combinedTotalCompWithBenefits > 0 ? (
+        <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 font-mono text-[11px] text-emerald-300 tabular-nums">
+          Total Comp: {mask(formatCurrency(summary.combinedTotalCompWithBenefits, { decimals: 0 }))}/yr
+        </span>
+      ) : (
+        <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-400">
+          Optional — unlocks exact paycheck, W-2 & 401(k)/HSA/ESPP math
+        </span>
+      )}
+
+      {summary.hasAnyTaxWithholding && summary.combinedAvgMonthlyNetBase > 0 && (
+        <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-[11px] text-sky-300 tabular-nums">
+          Net Base: {mask(formatCurrency(summary.combinedAvgMonthlyNetBase, { decimals: 0 }))}/mo
+        </span>
+      )}
+
+      {summary.combinedGrossComp > 0 && summary.fedTax.marginalRatePct > 0 && (
+        <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 font-mono text-[11px] text-violet-300 tabular-nums">
+          Est. {summary.fedTax.marginalRatePct}% Fed Bracket
+        </span>
+      )}
+
+      {ccEligibleLots.length > 0 && (
+        <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-[10px] text-sky-300">
+          CC-Eligible: {ccEligibleLots.map((l) => `${l.symbol} (${l.contracts}x)`).join(', ')}
+        </span>
+      )}
+
+      {isDirty && (
+        <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-200">
+          Unsaved edits
+        </span>
+      )}
+    </>
+  );
+
+  const isExpanded = standalone || profileOpen;
+
   return (
-    <div className="rounded-xl border border-zinc-800/90 bg-zinc-950/80">
-      {/* Collapsible Header Bar */}
-      <button
-        type="button"
-        onClick={() => setProfileOpen(!profileOpen)}
-        className="flex w-full flex-wrap items-center justify-between gap-3 px-5 py-3.5 text-left"
-      >
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <SlidersHorizontal className="h-4 w-4 text-emerald-400" />
-          <span className="text-sm font-semibold text-zinc-100">
-            Household Paystub, Compensation & Tax Engine (Zero-PII)
-          </span>
+    <div className={standalone ? 'space-y-5' : 'rounded-xl border border-zinc-800/90 bg-zinc-950/80'}>
+      {standalone ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800/90 bg-zinc-950/80 p-4">
+          <div className="space-y-1.5">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
+                <Briefcase className="h-4 w-4" />
+              </div>
+              <h1 className="text-base font-semibold text-zinc-100">
+                Pay & Taxes — Paystub & Compensation Engine
+              </h1>
+              <div className="flex flex-wrap items-center gap-2 text-xs">{summaryPills}</div>
+            </div>
+            <p className="text-xs text-zinc-400">
+              Model dual-earner W-2 paychecks, pre/post-tax deductions, 2026 IRS caps & federal withholding (Zero-PII • AAL2 RLS).
+            </p>
+          </div>
 
-          {summary.combinedTotalCompWithBenefits > 0 ? (
-            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 font-mono text-[11px] text-emerald-300 tabular-nums">
-              Total Comp: {mask(formatCurrency(summary.combinedTotalCompWithBenefits, { decimals: 0 }))}/yr
-            </span>
-          ) : (
-            <span className="rounded-full border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[10px] text-zinc-400">
-              Optional — unlocks exact paycheck, W-2 & 401(k)/HSA/ESPP math
-            </span>
-          )}
-
-          {summary.hasAnyTaxWithholding && summary.combinedAvgMonthlyNetBase > 0 && (
-            <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-[11px] text-sky-300 tabular-nums">
-              Net Base: {mask(formatCurrency(summary.combinedAvgMonthlyNetBase, { decimals: 0 }))}/mo
-            </span>
-          )}
-
-          {summary.combinedGrossComp > 0 && summary.fedTax.marginalRatePct > 0 && (
-            <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 font-mono text-[11px] text-violet-300 tabular-nums">
-              Est. {summary.fedTax.marginalRatePct}% Fed Bracket
-            </span>
-          )}
-
-          {ccEligibleLots.length > 0 && (
-            <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-[10px] text-sky-300">
-              CC-Eligible: {ccEligibleLots.map((l) => `${l.symbol} (${l.contracts}x)`).join(', ')}
-            </span>
-          )}
-
-          {isDirty && (
-            <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-200">
-              Unsaved edits
-            </span>
+          {onOpenAdvisor && (
+            <button
+              type="button"
+              onClick={onOpenAdvisor}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-emerald-500/35 bg-emerald-500/15 px-3.5 py-2 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/25"
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+              Ask AI CFO
+              <ArrowUpRight className="h-3.5 w-3.5" />
+            </button>
           )}
         </div>
-
-        <span className="inline-flex items-center gap-1 text-xs text-zinc-400">
-          {profileOpen ? 'Hide' : 'Edit Paystub & Tax Profile'}
-          {profileOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-        </span>
-      </button>
-
-      {profileOpen && (
-        <form
-          onSubmit={handleSaveProfile}
-          className="space-y-4 border-t border-zinc-800/80 p-5 text-xs"
+      ) : (
+        <button
+          type="button"
+          onClick={() => setProfileOpen(!profileOpen)}
+          className="flex w-full flex-wrap items-center justify-between gap-3 px-5 py-3.5 text-left"
         >
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <SlidersHorizontal className="h-4 w-4 text-emerald-400" />
+            <span className="text-sm font-semibold text-zinc-100">
+              Household Paystub, Compensation & Tax Engine (Zero-PII)
+            </span>
+            {summaryPills}
+          </div>
+
+          <span className="inline-flex items-center gap-1 text-xs text-zinc-400">
+            {profileOpen ? 'Hide' : 'Edit Paystub & Tax Profile'}
+            {profileOpen ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+          </span>
+        </button>
+      )}
+
+      {isExpanded && (
+        <div className={standalone ? 'rounded-xl border border-zinc-800/90 bg-zinc-950/80' : ''}>
+          <form
+            onSubmit={handleSaveProfile}
+            className={`space-y-4 p-5 text-xs ${standalone ? '' : 'border-t border-zinc-800/80'}`}
+          >
           {/* Zero-PII & Inner Sub-Tab Switcher Row */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="inline-flex flex-wrap items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/70 p-1">
@@ -1358,7 +1399,8 @@ export default function PaystubProfileCard({
               </button>
             </div>
           </div>
-        </form>
+          </form>
+        </div>
       )}
     </div>
   );
