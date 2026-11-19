@@ -10,16 +10,16 @@ const corsHeaders = {
 
 const ALLOWED_MODELS = [
   {
+    id: 'gemini-4-neon',
+    label: 'Gemini 4 Neon',
+    badge: 'Latest Flagship',
+    description: 'Newest Gemini 4 reasoning model for tax optimization, RSU math, debt & options strategy',
+  },
+  {
     id: 'gemini-4-argon',
     label: 'Gemini 4 Argon',
     badge: 'Balanced CFO',
-    description: 'Frontier reasoning for tax strategy, RSU planning, debt payoff & covered calls',
-  },
-  {
-    id: 'gemini-4-carbon',
-    label: 'Gemini 4 Carbon',
-    badge: 'Deep Strategy',
-    description: 'Strongest deep reasoning for multi-year wealth & complex tax modeling',
+    description: 'Efficient frontier reasoning for interactive financial & tax planning',
   },
   {
     id: 'gemini-4-hydrogen',
@@ -394,7 +394,7 @@ Deno.serve(async (req: Request) => {
     if (body?.action === 'status') {
       return jsonResp({
         configured: Boolean(apiKey),
-        defaultModel: 'gemini-4-argon',
+        defaultModel: 'gemini-4-neon',
         models: ALLOWED_MODELS,
       });
     }
@@ -421,8 +421,8 @@ Deno.serve(async (req: Request) => {
       return jsonResp({ error: 'Please send at least one message.' }, 400);
     }
 
-    const requestedModel = String(body?.model || 'gemini-4-argon');
-    const model = ALLOWED_MODEL_IDS.has(requestedModel) ? requestedModel : 'gemini-4-argon';
+    const requestedModel = String(body?.model || 'gemini-4-neon');
+    const model = ALLOWED_MODEL_IDS.has(requestedModel) ? requestedModel : 'gemini-4-neon';
     const scope = String(body?.scope || 'combined');
     const includeNotes = Boolean(body?.includeNotes);
 

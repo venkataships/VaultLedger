@@ -21,16 +21,16 @@ import { formatCurrency, toNumber } from '../lib/finance';
 
 const MODELS = [
   {
+    id: 'gemini-4-neon',
+    label: 'Gemini 4 Neon',
+    badge: 'Latest Flagship',
+    desc: 'Newest Gemini 4 reasoning model for tax strategy, RSU math & portfolio risk',
+  },
+  {
     id: 'gemini-4-argon',
     label: 'Gemini 4 Argon',
     badge: 'Balanced CFO',
-    desc: 'Best default for tax strategy, RSU math & portfolio risk',
-  },
-  {
-    id: 'gemini-4-carbon',
-    label: 'Gemini 4 Carbon',
-    badge: 'Deep Strategy',
-    desc: 'Strongest reasoning for complex multi-year tax & wealth plans',
+    desc: 'Efficient frontier reasoning for interactive tax & wealth planning',
   },
   {
     id: 'gemini-4-hydrogen',
@@ -269,7 +269,7 @@ export default function AdvisorTab({
   privacyMode,
   onTaxProfileSaved,
 }) {
-  const [selectedModel, setSelectedModel] = useState('gemini-4-argon');
+  const [selectedModel, setSelectedModel] = useState('gemini-4-neon');
   const [includeNotes, setIncludeNotes] = useState(false);
   const [advisorStatus, setAdvisorStatus] = useState({
     checking: true,
