@@ -194,6 +194,408 @@ function jsonResp(payload: unknown, status = 200) {
   });
 }
 
+const IRS_2026 = {
+  employee401k: 24500,
+  total401k415c: 72000,
+  hsaSelf: 4400,
+  hsaFamily: 8750,
+  healthFsa: 3400,
+  depCareFsaMfj: 7500,
+  depCareFsaMfs: 3750,
+  esppFmvCap: 25000,
+  standardDeduction: {
+    married_filing_jointly: 32200,
+    married_filing_separately: 16100,
+    single: 16100,
+    head_of_household: 24150,
+  } as Record<string, number>,
+  brackets: {
+    married_filing_jointly: [
+      [24800, 0.1],
+      [100800, 0.12],
+      [211400, 0.22],
+      [403550, 0.24],
+      [512450, 0.32],
+      [768700, 0.35],
+      [Number.POSITIVE_INFINITY, 0.37],
+    ],
+    single: [
+      [12400, 0.1],
+      [50400, 0.12],
+      [105700, 0.22],
+      [201775, 0.24],
+      [256225, 0.32],
+      [640600, 0.35],
+      [Number.POSITIVE_INFINITY, 0.37],
+    ],
+    married_filing_separately: [
+      [12400, 0.1],
+      [50400, 0.12],
+      [105700, 0.22],
+      [201775, 0.24],
+      [256225, 0.32],
+      [384350, 0.35],
+      [Number.POSITIVE_INFINITY, 0.37],
+    ],
+    head_of_household: [
+      [17700, 0.1],
+      [67450, 0.12],
+      [105700, 0.22],
+      [201750, 0.24],
+      [256200, 0.32],
+      [640600, 0.35],
+      [Number.POSITIVE_INFINITY, 0.37],
+    ],
+  } as Record<string, Array<[number, number]>>,
+};
+
+const PAY_FREQ_PERIODS: Record<string, number> = {
+  biweekly: 26,
+  semimonthly: 24,
+  monthly: 12,
+  weekly: 52,
+};
+
+function r2(v: number): number {
+  return Number(v.toFixed(2));
+}
+
+function compactObj(obj: Record<string, unknown>): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === undefined || v === null || v === false) continue;
+    if (typeof v === 'number' && Math.abs(v) < 0.005) continue;
+    out[k] = v;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function buildPersonPaystubSnapshot(
+  taxProfile: Record<string, unknown>,
+  prefix: 'primary' | 'spouse',
+  label: string
+) {
+  const baseSalary = Math.max(0, num(taxProfile[`${prefix}_base_salary`]));
+  const bonusAnnual = Math.max(0, num(taxProfile[`${prefix}_bonus_annual`]));
+  const rsuAnnual = Math.max(0, num(taxProfile[`${prefix}_rsu_annual`]));
+  const ytd401k = Math.max(0, num(taxProfile[`${prefix}_401k_ytd`]));
+  const hasMegaBackdoor = Boolean(taxProfile[`${prefix}_has_mega_backdoor`]);
+  const esppEnrolled = Boolean(taxProfile[`${prefix}_espp_enrolled`]);
+
+  const rawDetails = (taxProfile.paystub_details || {}) as Record<string, unknown>;
+  const stub = ((rawDetails?.[prefix] as Record<string, unknown>) || {}) as Record<string, unknown>;
+
+  const freq = PAY_FREQ_PERIODS[String(stub.pay_frequency || 'biweekly')]
+    ? String(stub.pay_frequency || 'biweekly')
+    : 'biweekly';
+  const periods = PAY_FREQ_PERIODS[freq];
+
+  const basePerCheck = baseSalary / periods;
+  const otherEarnings = Math.max(0, num(stub.other_earnings_per_check));
+  const grossPerCheck = basePerCheck + otherEarnings;
+
+  const trad401k = Math.max(0, num(stub.trad_401k_per_check));
+  const medical = Math.max(0, num(stub.medical_per_check));
+  const dentalVision = Math.max(0, num(stub.dental_vision_per_check));
+  const hsaEmp = Math.max(0, num(stub.hsa_employee_per_check));
+  const healthFsa = Math.max(0, num(stub.health_fsa_per_check));
+  const depCareFsa = Math.max(0, num(stub.dep_care_fsa_per_check));
+  const otherPreTax = Math.max(0, num(stub.other_pretax_per_check));
+  const preTaxPerCheck =
+    trad401k + medical + dentalVision + hsaEmp + healthFsa + depCareFsa + otherPreTax;
+
+  const fedTax = Math.max(0, num(stub.fed_tax_per_check));
+  const stateTax = Math.max(0, num(stub.state_tax_per_check));
+  const fica = Math.max(0, num(stub.fica_per_check));
+  const taxesPerCheck = fedTax + stateTax + fica;
+
+  const roth401k = Math.max(0, num(stub.roth_401k_per_check));
+  const afterTax401k = Math.max(0, num(stub.after_tax_per_check ?? stub.after_tax_401k_per_check));
+  const esppPerCheck = Math.max(0, num(stub.espp_per_check));
+  const esppDiscountPct =
+    stub.espp_discount_pct !== undefined
+      ? Math.max(0, Math.min(50, num(stub.espp_discount_pct)))
+      : 15;
+  const otherPostTax = Math.max(0, num(stub.other_posttax_per_check));
+  const postTaxPerCheck = roth401k + afterTax401k + esppPerCheck + otherPostTax;
+
+  const netPerCheck = grossPerCheck - preTaxPerCheck - taxesPerCheck - postTaxPerCheck;
+  const employerMatchAnnual = Math.max(0, num(stub.employer_401k_match_annual));
+  const employerHsaAnnual = Math.max(0, num(stub.employer_hsa_annual));
+  const has401kTrueUp = stub.has_401k_true_up === undefined ? true : Boolean(stub.has_401k_true_up);
+  const bonusWhPct =
+    stub.bonus_withholding_pct !== undefined
+      ? Math.max(0, Math.min(55, num(stub.bonus_withholding_pct)))
+      : 22;
+  const rsuWhPct =
+    stub.rsu_withholding_pct !== undefined
+      ? Math.max(0, Math.min(55, num(stub.rsu_withholding_pct)))
+      : 22;
+
+  const annualBaseGross = grossPerCheck * periods;
+  const annualGrossComp = annualBaseGross + bonusAnnual + rsuAnnual;
+  const annualTrad401k = trad401k * periods;
+  const annualRoth401k = roth401k * periods;
+  const annualEmployee401k = annualTrad401k + annualRoth401k;
+  const annualAfterTax401k = afterTax401k * periods;
+  const total415cProjected =
+    Math.min(annualEmployee401k, IRS_2026.employee401k) + employerMatchAnnual + annualAfterTax401k;
+  const remaining401kByYtd = Math.max(0, IRS_2026.employee401k - ytd401k);
+  const remaining415cRoom = Math.max(0, IRS_2026.total401k415c - total415cProjected);
+  const electivePerCheck = trad401k + roth401k;
+  const early401kMaxOutCheck =
+    electivePerCheck > 0 && annualEmployee401k > IRS_2026.employee401k + 1
+      ? Math.ceil(IRS_2026.employee401k / electivePerCheck)
+      : null;
+
+  const annualHsaEmp = hsaEmp * periods;
+  const annualHsaTotal = annualHsaEmp + employerHsaAnnual;
+  const annualHealthFsa = healthFsa * periods;
+  const annualDepCareFsa = depCareFsa * periods;
+  const annualHealthPremiums = (medical + dentalVision) * periods;
+  const annualPreTaxTotal = preTaxPerCheck * periods;
+  const annualTaxesFromBase = taxesPerCheck * periods;
+  const annualFedFromBase = fedTax * periods;
+  const annualPostTaxTotal = postTaxPerCheck * periods;
+  const annualNetBase = netPerCheck * periods;
+  const avgMonthlyNetBase = annualNetBase / 12;
+
+  const annualEspp = esppPerCheck * periods;
+  const discountDec = esppDiscountPct / 100;
+  const esppMaxCash =
+    discountDec < 1 ? IRS_2026.esppFmvCap * (1 - discountDec) : IRS_2026.esppFmvCap;
+  const annualEsppGain =
+    discountDec > 0 && discountDec < 1 ? annualEspp * (discountDec / (1 - discountDec)) : 0;
+
+  const suppFedWithheld = bonusAnnual * (bonusWhPct / 100) + rsuAnnual * (rsuWhPct / 100);
+  const hasPaystub = preTaxPerCheck > 0 || taxesPerCheck > 0 || postTaxPerCheck > 0;
+
+  return {
+    raw: {
+      label,
+      annualGrossComp,
+      annualBaseGross,
+      bonusAnnual,
+      rsuAnnual,
+      ytd401k,
+      hasMegaBackdoor,
+      esppEnrolled,
+      periods,
+      has401kTrueUp,
+      employerMatchAnnual,
+      employerHsaAnnual,
+      early401kMaxOutCheck,
+      annualHsaTotal,
+      annualHealthFsa,
+      annualDepCareFsa,
+      annualPreTaxTotal,
+      annualFedFromBase,
+      annualTaxesFromBase,
+      annualPostTaxTotal,
+      annualNetBase,
+      avgMonthlyNetBase,
+      annualEspp,
+      esppDiscountPct,
+      esppMaxCash,
+      annualEsppGain,
+      bonusWhPct,
+      rsuWhPct,
+      suppFedWithheld,
+      hasFedTax: fedTax > 0,
+      hasPaystubTaxes: taxesPerCheck > 0,
+      hasPaystub,
+    },
+    json: compactObj({
+      pay_frequency: annualGrossComp > 0 || hasPaystub ? freq : undefined,
+      base_salary: r2(baseSalary),
+      annual_bonus: r2(bonusAnnual),
+      annual_rsu: r2(rsuAnnual),
+      employer_401k_match_annual: r2(employerMatchAnnual),
+      employer_hsa_seed_annual: r2(employerHsaAnnual),
+      has_401k_true_up: annualGrossComp > 0 ? has401kTrueUp : undefined,
+      bonus_fed_wh_pct: bonusAnnual > 0 ? bonusWhPct : undefined,
+      rsu_fed_wh_pct: rsuAnnual > 0 ? rsuWhPct : undefined,
+      contrib_401k_ytd: r2(ytd401k),
+      remaining_24500_401k_by_ytd: annualGrossComp > 0 || ytd401k > 0 ? r2(remaining401kByYtd) : undefined,
+      has_mega_backdoor_roth: hasMegaBackdoor,
+      espp_enrolled: esppEnrolled,
+      paystub_per_check: hasPaystub
+        ? compactObj({
+            gross: r2(grossPerCheck),
+            pre_tax_total: r2(preTaxPerCheck),
+            trad_401k: r2(trad401k),
+            medical: r2(medical),
+            dental_vision: r2(dentalVision),
+            hsa_employee: r2(hsaEmp),
+            health_fsa: r2(healthFsa),
+            dep_care_fsa: r2(depCareFsa),
+            other_pretax: r2(otherPreTax),
+            taxes_total: r2(taxesPerCheck),
+            federal_tax: r2(fedTax),
+            state_tax: r2(stateTax),
+            fica: r2(fica),
+            post_tax_total: r2(postTaxPerCheck),
+            roth_401k: r2(roth401k),
+            after_tax_401k_mbdr: r2(afterTax401k),
+            espp: r2(esppPerCheck),
+            other_posttax: r2(otherPostTax),
+            net_deposit: r2(netPerCheck),
+          })
+        : undefined,
+      annualized_run_rate: hasPaystub
+        ? compactObj({
+            trad_401k: r2(annualTrad401k),
+            roth_401k: r2(annualRoth401k),
+            after_tax_401k_mbdr: r2(annualAfterTax401k),
+            total_415c_401k_vs_72k: r2(total415cProjected),
+            remaining_415c_mbdr_room: hasMegaBackdoor ? r2(remaining415cRoom) : undefined,
+            health_dental_premiums: r2(annualHealthPremiums),
+            hsa_employee_plus_employer: r2(annualHsaTotal),
+            health_fsa: r2(annualHealthFsa),
+            dep_care_fsa: r2(annualDepCareFsa),
+            espp_contribution: r2(annualEspp),
+            espp_implied_discount_gain: r2(annualEsppGain),
+            taxes_from_base: r2(annualTaxesFromBase),
+            net_base_annual: r2(annualNetBase),
+            avg_monthly_net_base: r2(avgMonthlyNetBase),
+          })
+        : undefined,
+    }),
+  };
+}
+
+function buildPaystubSnapshot(
+  taxProfile: Record<string, unknown>,
+  primaryName: string,
+  spouseName: string
+) {
+  const filingStatus = String(taxProfile.filing_status || 'married_filing_jointly');
+  const hsaPlanType = String(taxProfile.hsa_plan_type || 'none');
+  const hsaYtd = Math.max(0, num(taxProfile.hsa_contrib_ytd));
+
+  const p = buildPersonPaystubSnapshot(taxProfile, 'primary', primaryName);
+  const s = buildPersonPaystubSnapshot(taxProfile, 'spouse', spouseName);
+
+  const combinedGrossComp = p.raw.annualGrossComp + s.raw.annualGrossComp;
+  const combinedPreTax = p.raw.annualPreTaxTotal + s.raw.annualPreTaxTotal;
+  const stdDed =
+    IRS_2026.standardDeduction[filingStatus] ?? IRS_2026.standardDeduction.married_filing_jointly;
+  const taxableInc = Math.max(0, combinedGrossComp - combinedPreTax - stdDed);
+  const brackets = IRS_2026.brackets[filingStatus] ?? IRS_2026.brackets.married_filing_jointly;
+
+  let estFedTax = 0;
+  let prevCap = 0;
+  let marginalRate = brackets[0][1];
+  for (const [cap, rate] of brackets) {
+    if (taxableInc <= prevCap) break;
+    const slice = Math.min(taxableInc, cap) - prevCap;
+    if (slice > 0) {
+      estFedTax += slice * rate;
+      marginalRate = rate;
+    }
+    prevCap = cap;
+  }
+  const marginalPct = taxableInc > 0 ? Math.round(marginalRate * 100) : 0;
+
+  const hsaLimit =
+    hsaPlanType === 'family' ? IRS_2026.hsaFamily : hsaPlanType === 'self' ? IRS_2026.hsaSelf : 0;
+  const hsaProjectedTotal = p.raw.annualHsaTotal + s.raw.annualHsaTotal;
+  const depCareLimit =
+    filingStatus === 'married_filing_separately' ? IRS_2026.depCareFsaMfs : IRS_2026.depCareFsaMfj;
+  const depCareTotal = p.raw.annualDepCareFsa + s.raw.annualDepCareFsa;
+
+  const hasAnyFedWh = p.raw.hasFedTax || s.raw.hasFedTax;
+  const hasAnyTaxes = p.raw.hasPaystubTaxes || s.raw.hasPaystubTaxes;
+  const projectedFedWh =
+    p.raw.annualFedFromBase +
+    s.raw.annualFedFromBase +
+    p.raw.suppFedWithheld +
+    s.raw.suppFedWithheld;
+
+  const marginalDec = marginalPct / 100;
+  const suppGap =
+    marginalPct > 0
+      ? p.raw.bonusAnnual * Math.max(0, marginalDec - p.raw.bonusWhPct / 100) +
+        p.raw.rsuAnnual * Math.max(0, marginalDec - p.raw.rsuWhPct / 100) +
+        s.raw.bonusAnnual * Math.max(0, marginalDec - s.raw.bonusWhPct / 100) +
+        s.raw.rsuAnnual * Math.max(0, marginalDec - s.raw.rsuWhPct / 100)
+      : 0;
+
+  const alerts: string[] = [];
+  for (const side of [p.raw, s.raw]) {
+    if (side.early401kMaxOutCheck && side.early401kMaxOutCheck < side.periods) {
+      if (!side.has401kTrueUp && side.employerMatchAnnual > 0) {
+        alerts.push(
+          `${side.label}: Early 401k max-out on check #${side.early401kMaxOutCheck}/${side.periods} with NO employer true-up (match forfeiture risk).`
+        );
+      } else {
+        alerts.push(
+          `${side.label}: 401k elective run rate hits $24,500 on check #${side.early401kMaxOutCheck}.`
+        );
+      }
+    }
+    if (side.annualEspp > side.esppMaxCash + 25) {
+      alerts.push(`${side.label}: ESPP contribution ($${Math.round(side.annualEspp)}) exceeds §423 cap.`);
+    }
+  }
+  if (hsaLimit > 0 && hsaProjectedTotal > hsaLimit + 1) {
+    alerts.push(`Household HSA projected ($${Math.round(hsaProjectedTotal)}) exceeds $${hsaLimit} IRS cap.`);
+  }
+  if ((hsaLimit > 0 || hsaProjectedTotal > 0) && p.raw.annualHealthFsa + s.raw.annualHealthFsa > 0) {
+    alerts.push('Both HSA and Healthcare FSA active — confirm Healthcare FSA is Limited-Purpose.');
+  }
+  if (depCareTotal > depCareLimit + 1) {
+    alerts.push(`Dependent Care FSA ($${Math.round(depCareTotal)}) exceeds $${depCareLimit} cap.`);
+  }
+  if (suppGap >= 500) {
+    alerts.push(
+      `Supplemental bonus/RSU withholding gap ~$${Math.round(suppGap)} (marginal ${marginalPct}%).`
+    );
+  }
+
+  return compactObj({
+    filing_status: filingStatus,
+    state_code: taxProfile.state_code || 'Not specified',
+    dependents_count: num(taxProfile.dependents_count),
+    hsa_plan_type: hsaPlanType,
+    hsa_contrib_ytd: r2(hsaYtd),
+    hsa_remaining_by_ytd: hsaLimit > 0 ? r2(Math.max(0, hsaLimit - hsaYtd)) : undefined,
+    risk_tolerance: taxProfile.risk_tolerance,
+    financial_goals: taxProfile.financial_goals || undefined,
+    combined_summary: compactObj({
+      gross_cash_and_rsu_comp: r2(combinedGrossComp),
+      total_comp_incl_employer_match_hsa_espp: r2(
+        combinedGrossComp +
+          p.raw.employerMatchAnnual +
+          s.raw.employerMatchAnnual +
+          p.raw.employerHsaAnnual +
+          s.raw.employerHsaAnnual +
+          p.raw.annualEsppGain +
+          s.raw.annualEsppGain
+      ),
+      annual_pretax_deductions_from_paystubs: r2(combinedPreTax),
+      est_2026_fed_marginal_bracket_pct: marginalPct,
+      est_2026_fed_effective_rate_pct:
+        combinedGrossComp > 0 ? r2((estFedTax / combinedGrossComp) * 100) : undefined,
+      est_2026_fed_tax_liability: r2(estFedTax),
+      projected_fed_withheld_from_paystubs_and_supp: hasAnyFedWh ? r2(projectedFedWh) : undefined,
+      est_fed_withholding_surplus_or_shortfall: hasAnyFedWh
+        ? r2(projectedFedWh - estFedTax)
+        : undefined,
+      est_supplemental_rsu_bonus_withholding_gap: r2(suppGap),
+      combined_monthly_net_base_take_home: hasAnyTaxes
+        ? r2(p.raw.avgMonthlyNetBase + s.raw.avgMonthlyNetBase)
+        : undefined,
+      combined_annual_net_base_take_home: hasAnyTaxes
+        ? r2(p.raw.annualNetBase + s.raw.annualNetBase)
+        : undefined,
+    }),
+    primary_pay_and_paystub: p.json,
+    spouse_pay_and_paystub: s.json,
+    paystub_alerts: alerts.length > 0 ? alerts : undefined,
+  });
+}
+
 function buildSanitizedFinancialContext(params: {
   accounts: Array<Record<string, unknown>>;
   holdings: Array<Record<string, unknown>>;
@@ -461,32 +863,8 @@ function buildSanitizedFinancialContext(params: {
     recurring_bills_monthly_baseline_usd: Number(recurringMonthlyTotal.toFixed(2)),
     budgets: Object.keys(budgetMap).length > 0 ? budgetMap : undefined,
     tax_and_comp_profile: taxProfile
-      ? {
-          filing_status: taxProfile.filing_status,
-          state_code: taxProfile.state_code || 'Not specified',
-          dependents_count: taxProfile.dependents_count,
-          primary_comp: {
-            base_salary: num(taxProfile.primary_base_salary),
-            annual_bonus: num(taxProfile.primary_bonus_annual),
-            annual_rsu: num(taxProfile.primary_rsu_annual),
-            contrib_401k_ytd: num(taxProfile.primary_401k_ytd),
-            has_mega_backdoor_roth: Boolean(taxProfile.primary_has_mega_backdoor),
-            espp_enrolled: Boolean(taxProfile.primary_espp_enrolled),
-          },
-          spouse_comp: {
-            base_salary: num(taxProfile.spouse_base_salary),
-            annual_bonus: num(taxProfile.spouse_bonus_annual),
-            annual_rsu: num(taxProfile.spouse_rsu_annual),
-            contrib_401k_ytd: num(taxProfile.spouse_401k_ytd),
-            has_mega_backdoor_roth: Boolean(taxProfile.spouse_has_mega_backdoor),
-            espp_enrolled: Boolean(taxProfile.spouse_espp_enrolled),
-          },
-          hsa_plan_type: taxProfile.hsa_plan_type,
-          hsa_contrib_ytd: num(taxProfile.hsa_contrib_ytd),
-          risk_tolerance: taxProfile.risk_tolerance,
-          financial_goals: taxProfile.financial_goals || undefined,
-        }
-      : 'Not filled in yet — remind user they can fill in the zero-PII Pay & Tax Profile panel for exact tax-bracket and contribution headroom math.',
+      ? buildPaystubSnapshot(taxProfile, primaryName, spouseName)
+      : 'Not filled in yet — remind user they can fill in the zero-PII Paystub & Tax Engine panel for exact paycheck, withholding, and IRS headroom math.',
   };
 
   return {
@@ -619,7 +997,7 @@ Deno.serve(async (req: Request) => {
       'Guidelines:',
       '1. Ground EVERY answer in the exact numbers from the LIVE HOUSEHOLD FINANCIAL SNAPSHOT below. Do not invent balances or accounts that are not listed.',
       '2. Be concrete, quantitative, and structured: use clear Markdown headings, bullet points, exact dollar figures, percentages, and prioritized action steps.',
-      '3. Tax Optimization ("tax cheat codes"): Analyze 2026 IRS caps (401k employee limit $24,500 if applicable or note current-year cap clearly, Mega Backdoor Roth up to ~$72,000 total 415(c) limit, HSA self/family, Backdoor Roth IRA, ESPP qualifying disposition, RSU 22% supplemental withholding gap vs. higher marginal bracket, tax-loss harvesting, and US/India cross-border reporting reminders like FBAR/Form 8938 when India assets exist).',
+      '3. Tax & Paystub Optimization ("tax cheat codes"): Analyze 2026 IRS caps ($24,500 employee 401k Trad+Roth, $72,000 total 415(c) Mega Backdoor Roth, HSA $4,400 self / $8,750 family incl. employer seed, Healthcare FSA $3,400 / LPFSA rules, Dependent Care FSA $7,500 MFJ / $3,750 MFS, ESPP §423 $25,000 FMV limit & qualifying disposition, Social Security wage base $184,500, standard deduction $32,200 MFJ / $16,100 single). When per-paycheck paystub deductions are populated, audit Trad vs. Roth vs. After-Tax 401k pacing, employer true-up match forfeiture risk, federal/state/FICA paycheck withholding accuracy vs. estimated liability, RSU/bonus supplemental withholding gaps above 22%, tax-loss harvesting, and US/India cross-border reporting reminders (FBAR/Form 8938) when India assets exist.',
       '4. Debt & 0% Promos: Always flag upcoming 0% balance transfer expirations and compute exact monthly payoff cash needed vs. liquid cash runway, and compare mortgage/auto loan APRs against after-tax risk-free yield.',
       '5. Covered Calls (CC) & Cash-Secured Puts (CSP): When asked about options income, ONLY reference eligible 100-share lots or actual available cash, and emphasize strict risk management (position sizing, avoiding earnings week, 20–30 delta OTM strikes, 30–45 DTE, assignment tax consequences on low-basis RSUs/stocks, and never risking emergency fund cash).',
       '6. Privacy & Safety: Never ask for SSN, home street address, full account numbers, or passwords. Include a brief one-line reminder on major tax/legal strategies to verify with a CPA when executing.',

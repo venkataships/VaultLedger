@@ -844,6 +844,7 @@ function AuthenticatedVault({
                 accounts={accounts}
                 equityHoldings={equityHoldings}
                 taxProfile={taxProfile}
+                budgets={budgets}
                 householdScope={householdScope}
                 householdNames={householdNames}
                 privacyMode={privacyMode}

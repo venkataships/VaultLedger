@@ -817,3 +817,645 @@ export async function decodeVehicleVin(rawVin) {
   };
 }
 
+// ============================================================================
+// 2026 US W-2 Paystub & Compensation Engine (Zero-PII)
+// ============================================================================
+
+export const IRS_2026_LIMITS = {
+  employee401k: 24500,
+  total401k415c: 72000,
+  hsaSelf: 4400,
+  hsaFamily: 8750,
+  healthFsa: 3400,
+  depCareFsaMfj: 7500,
+  depCareFsaMfs: 3750,
+  esppFmvCap: 25000,
+  ssWageBase: 184500,
+  ssRate: 0.062,
+  medicareRate: 0.0145,
+  standardDeduction: {
+    married_filing_jointly: 32200,
+    married_filing_separately: 16100,
+    single: 16100,
+    head_of_household: 24150,
+  },
+  federalBrackets: {
+    married_filing_jointly: [
+      [24800, 0.1],
+      [100800, 0.12],
+      [211400, 0.22],
+      [403550, 0.24],
+      [512450, 0.32],
+      [768700, 0.35],
+      [Infinity, 0.37],
+    ],
+    single: [
+      [12400, 0.1],
+      [50400, 0.12],
+      [105700, 0.22],
+      [201775, 0.24],
+      [256225, 0.32],
+      [640600, 0.35],
+      [Infinity, 0.37],
+    ],
+    married_filing_separately: [
+      [12400, 0.1],
+      [50400, 0.12],
+      [105700, 0.22],
+      [201775, 0.24],
+      [256225, 0.32],
+      [384350, 0.35],
+      [Infinity, 0.37],
+    ],
+    head_of_household: [
+      [17700, 0.1],
+      [67450, 0.12],
+      [105700, 0.22],
+      [201750, 0.24],
+      [256200, 0.32],
+      [640600, 0.35],
+      [Infinity, 0.37],
+    ],
+  },
+};
+
+export const PAY_FREQUENCIES = [
+  { id: 'biweekly', label: 'Bi-Weekly (26/yr)', periods: 26 },
+  { id: 'semimonthly', label: 'Semi-Monthly (24/yr)', periods: 24 },
+  { id: 'monthly', label: 'Monthly (12/yr)', periods: 12 },
+  { id: 'weekly', label: 'Weekly (52/yr)', periods: 52 },
+];
+
+export function getPayFrequencyMeta(freqId) {
+  return PAY_FREQUENCIES.find((f) => f.id === freqId) || PAY_FREQUENCIES[0];
+}
+
+export function createDefaultPersonPaystub() {
+  return {
+    pay_frequency: 'biweekly',
+    other_earnings_per_check: '',
+    employer_401k_match_annual: '',
+    has_401k_true_up: true,
+    employer_hsa_annual: '',
+    bonus_withholding_pct: '22',
+    rsu_withholding_pct: '22',
+    trad_401k_per_check: '',
+    medical_per_check: '',
+    dental_vision_per_check: '',
+    hsa_employee_per_check: '',
+    health_fsa_per_check: '',
+    dep_care_fsa_per_check: '',
+    other_pretax_per_check: '',
+    fed_tax_per_check: '',
+    state_tax_per_check: '',
+    fica_per_check: '',
+    roth_401k_per_check: '',
+    after_tax_401k_per_check: '',
+    espp_per_check: '',
+    espp_discount_pct: '15',
+    other_posttax_per_check: '',
+  };
+}
+
+function normalizeOnePersonPaystub(raw) {
+  const defaults = createDefaultPersonPaystub();
+  if (!raw || typeof raw !== 'object') return defaults;
+
+  const numStr = (val, fallback = '') => {
+    if (val === '' || val === null || val === undefined) return fallback;
+    const n = Number(val);
+    return Number.isFinite(n) ? String(n) : fallback;
+  };
+
+  return {
+    pay_frequency: PAY_FREQUENCIES.some((f) => f.id === raw.pay_frequency)
+      ? raw.pay_frequency
+      : defaults.pay_frequency,
+    other_earnings_per_check: numStr(raw.other_earnings_per_check),
+    employer_401k_match_annual: numStr(raw.employer_401k_match_annual),
+    has_401k_true_up:
+      raw.has_401k_true_up === undefined ? defaults.has_401k_true_up : Boolean(raw.has_401k_true_up),
+    employer_hsa_annual: numStr(raw.employer_hsa_annual),
+    bonus_withholding_pct: numStr(raw.bonus_withholding_pct, defaults.bonus_withholding_pct),
+    rsu_withholding_pct: numStr(raw.rsu_withholding_pct, defaults.rsu_withholding_pct),
+    trad_401k_per_check: numStr(raw.trad_401k_per_check),
+    medical_per_check: numStr(raw.medical_per_check),
+    dental_vision_per_check: numStr(raw.dental_vision_per_check),
+    hsa_employee_per_check: numStr(raw.hsa_employee_per_check),
+    health_fsa_per_check: numStr(raw.health_fsa_per_check),
+    dep_care_fsa_per_check: numStr(raw.dep_care_fsa_per_check),
+    other_pretax_per_check: numStr(raw.other_pretax_per_check),
+    fed_tax_per_check: numStr(raw.fed_tax_per_check),
+    state_tax_per_check: numStr(raw.state_tax_per_check),
+    fica_per_check: numStr(raw.fica_per_check),
+    roth_401k_per_check: numStr(raw.roth_401k_per_check),
+    after_tax_401k_per_check: numStr(raw.after_tax_401k_per_check),
+    espp_per_check: numStr(raw.espp_per_check),
+    espp_discount_pct: numStr(raw.espp_discount_pct, defaults.espp_discount_pct),
+    other_posttax_per_check: numStr(raw.other_posttax_per_check),
+  };
+}
+
+export function normalizePaystubDetails(raw) {
+  const src = raw && typeof raw === 'object' ? raw : {};
+  return {
+    primary: normalizeOnePersonPaystub(src.primary),
+    spouse: normalizeOnePersonPaystub(src.spouse),
+  };
+}
+
+export function sanitizePaystubDetailsForDb(raw) {
+  const norm = normalizePaystubDetails(raw);
+  const cleanPerson = (p) => ({
+    pay_frequency: p.pay_frequency,
+    other_earnings_per_check: Math.max(0, toNumber(p.other_earnings_per_check)),
+    employer_401k_match_annual: Math.max(0, toNumber(p.employer_401k_match_annual)),
+    has_401k_true_up: Boolean(p.has_401k_true_up),
+    employer_hsa_annual: Math.max(0, toNumber(p.employer_hsa_annual)),
+    bonus_withholding_pct: Math.max(0, Math.min(55, toNumber(p.bonus_withholding_pct))),
+    rsu_withholding_pct: Math.max(0, Math.min(55, toNumber(p.rsu_withholding_pct))),
+    trad_401k_per_check: Math.max(0, toNumber(p.trad_401k_per_check)),
+    medical_per_check: Math.max(0, toNumber(p.medical_per_check)),
+    dental_vision_per_check: Math.max(0, toNumber(p.dental_vision_per_check)),
+    hsa_employee_per_check: Math.max(0, toNumber(p.hsa_employee_per_check)),
+    health_fsa_per_check: Math.max(0, toNumber(p.health_fsa_per_check)),
+    dep_care_fsa_per_check: Math.max(0, toNumber(p.dep_care_fsa_per_check)),
+    other_pretax_per_check: Math.max(0, toNumber(p.other_pretax_per_check)),
+    fed_tax_per_check: Math.max(0, toNumber(p.fed_tax_per_check)),
+    state_tax_per_check: Math.max(0, toNumber(p.state_tax_per_check)),
+    fica_per_check: Math.max(0, toNumber(p.fica_per_check)),
+    roth_401k_per_check: Math.max(0, toNumber(p.roth_401k_per_check)),
+    after_tax_401k_per_check: Math.max(0, toNumber(p.after_tax_401k_per_check)),
+    espp_per_check: Math.max(0, toNumber(p.espp_per_check)),
+    espp_discount_pct: Math.max(0, Math.min(50, toNumber(p.espp_discount_pct))),
+    other_posttax_per_check: Math.max(0, toNumber(p.other_posttax_per_check)),
+  });
+
+  return {
+    primary: cleanPerson(norm.primary),
+    spouse: cleanPerson(norm.spouse),
+  };
+}
+
+export function estimate2026FederalTax(grossAnnualIncome, totalPreTaxAnnual, filingStatus) {
+  const statusKey = IRS_2026_LIMITS.federalBrackets[filingStatus]
+    ? filingStatus
+    : 'married_filing_jointly';
+  const stdDeduction = IRS_2026_LIMITS.standardDeduction[statusKey];
+  const brackets = IRS_2026_LIMITS.federalBrackets[statusKey];
+
+  const gross = Math.max(0, toNumber(grossAnnualIncome));
+  const preTax = Math.max(0, toNumber(totalPreTaxAnnual));
+  const agiEstimate = Math.max(0, gross - preTax);
+  const taxableIncome = Math.max(0, agiEstimate - stdDeduction);
+
+  let estimatedTax = 0;
+  let prevCap = 0;
+  let marginalRate = brackets[0][1];
+
+  for (const [cap, rate] of brackets) {
+    if (taxableIncome <= prevCap) break;
+    const slice = Math.min(taxableIncome, cap) - prevCap;
+    if (slice > 0) {
+      estimatedTax += slice * rate;
+      marginalRate = rate;
+    }
+    prevCap = cap;
+  }
+
+  const marginalRatePct = taxableIncome > 0 ? Math.round(marginalRate * 100) : 0;
+  const effectiveRatePct = gross > 0 ? (estimatedTax / gross) * 100 : 0;
+
+  return {
+    filingStatus: statusKey,
+    stdDeduction,
+    agiEstimate,
+    taxableIncome,
+    estimatedTax,
+    marginalRatePct,
+    effectiveRatePct,
+  };
+}
+
+export function computePersonPaystub(annualFields, paystubFields) {
+  const baseSalary = Math.max(0, toNumber(annualFields?.baseSalary));
+  const bonusAnnual = Math.max(0, toNumber(annualFields?.bonusAnnual));
+  const rsuAnnual = Math.max(0, toNumber(annualFields?.rsuAnnual));
+  const ytd401k = Math.max(0, toNumber(annualFields?.ytd401k));
+  const hasMegaBackdoor = Boolean(annualFields?.hasMegaBackdoor);
+  const esppEnrolled = Boolean(annualFields?.esppEnrolled);
+
+  const p = normalizeOnePersonPaystub(paystubFields);
+  const freqMeta = getPayFrequencyMeta(p.pay_frequency);
+  const periods = freqMeta.periods;
+
+  const basePerPaycheck = baseSalary / periods;
+  const otherEarningsPerPaycheck = Math.max(0, toNumber(p.other_earnings_per_check));
+  const grossPerPaycheck = basePerPaycheck + otherEarningsPerPaycheck;
+
+  // Pre-tax per check
+  const trad401k = Math.max(0, toNumber(p.trad_401k_per_check));
+  const medical = Math.max(0, toNumber(p.medical_per_check));
+  const dentalVision = Math.max(0, toNumber(p.dental_vision_per_check));
+  const hsaEmployee = Math.max(0, toNumber(p.hsa_employee_per_check));
+  const healthFsa = Math.max(0, toNumber(p.health_fsa_per_check));
+  const depCareFsa = Math.max(0, toNumber(p.dep_care_fsa_per_check));
+  const otherPreTax = Math.max(0, toNumber(p.other_pretax_per_check));
+
+  const section125PreTaxPerPaycheck = medical + dentalVision + hsaEmployee + healthFsa + depCareFsa;
+  const preTaxPerPaycheck = trad401k + section125PreTaxPerPaycheck + otherPreTax;
+  const taxablePerPaycheck = Math.max(0, grossPerPaycheck - preTaxPerPaycheck);
+
+  // Taxes per check
+  const fedTax = Math.max(0, toNumber(p.fed_tax_per_check));
+  const stateTax = Math.max(0, toNumber(p.state_tax_per_check));
+  const fica = Math.max(0, toNumber(p.fica_per_check));
+  const taxesPerPaycheck = fedTax + stateTax + fica;
+
+  // Post-tax per check
+  const roth401k = Math.max(0, toNumber(p.roth_401k_per_check));
+  const afterTax401k = Math.max(0, toNumber(p.after_tax_401k_per_check));
+  const esppPerCheck = Math.max(0, toNumber(p.espp_per_check));
+  const esppDiscountPct = Math.max(0, Math.min(50, toNumber(p.espp_discount_pct)));
+  const otherPostTax = Math.max(0, toNumber(p.other_posttax_per_check));
+  const postTaxPerPaycheck = roth401k + afterTax401k + esppPerCheck + otherPostTax;
+
+  const netPerPaycheck = grossPerPaycheck - preTaxPerPaycheck - taxesPerPaycheck - postTaxPerPaycheck;
+
+  const annualFicaTaxableEstimate = Math.max(0, grossPerPaycheck - section125PreTaxPerPaycheck) * periods;
+  const estAnnualSs =
+    Math.min(annualFicaTaxableEstimate, IRS_2026_LIMITS.ssWageBase) * IRS_2026_LIMITS.ssRate;
+  const estAnnualMed =
+    annualFicaTaxableEstimate * IRS_2026_LIMITS.medicareRate +
+    Math.max(0, annualFicaTaxableEstimate - 200000) * 0.009;
+  const estimatedFicaPerPaycheck =
+    grossPerPaycheck > 0 ? Number(((estAnnualSs + estAnnualMed) / periods).toFixed(2)) : 0;
+
+  const effectiveWithholdingPct =
+    grossPerPaycheck > 0 ? (taxesPerPaycheck / grossPerPaycheck) * 100 : 0;
+
+  // Annual & monthly aggregates
+  const annualBaseWithOther = grossPerPaycheck * periods;
+  const annualCashAndEquityComp = annualBaseWithOther + bonusAnnual + rsuAnnual;
+  const annualNetBase = netPerPaycheck * periods;
+  const avgMonthlyNetBase = annualNetBase / 12;
+  const typicalTwoCheckMonthlyNet =
+    p.pay_frequency === 'biweekly' ? netPerPaycheck * 2 : avgMonthlyNetBase;
+  const extraBiweeklyPaychecksAnnual = p.pay_frequency === 'biweekly' ? netPerPaycheck * 2 : 0;
+
+  // Annualized deductions & benefits
+  const annualTrad401k = trad401k * periods;
+  const annualRoth401k = roth401k * periods;
+  const annualEmployee401kProjected = annualTrad401k + annualRoth401k;
+  const annualAfterTax401k = afterTax401k * periods;
+  const employerMatchAnnual = Math.max(0, toNumber(p.employer_401k_match_annual));
+  const total401k415cProjected =
+    Math.min(annualEmployee401kProjected, IRS_2026_LIMITS.employee401k) +
+    employerMatchAnnual +
+    annualAfterTax401k;
+
+  const remaining401kByYtd = Math.max(0, IRS_2026_LIMITS.employee401k - ytd401k);
+  const remaining415cRoom = Math.max(0, IRS_2026_LIMITS.total401k415c - total401k415cProjected);
+  const maxPerCheck401kTarget = Number((IRS_2026_LIMITS.employee401k / periods).toFixed(2));
+  const electivePerCheck = trad401k + roth401k;
+  const early401kMaxOutCheck =
+    electivePerCheck > 0 && annualEmployee401kProjected > IRS_2026_LIMITS.employee401k + 1
+      ? Math.ceil(IRS_2026_LIMITS.employee401k / electivePerCheck)
+      : null;
+
+  const annualMedical = medical * periods;
+  const annualDentalVision = dentalVision * periods;
+  const annualHealthPremiums = annualMedical + annualDentalVision;
+
+  const annualHsaEmployee = hsaEmployee * periods;
+  const employerHsaAnnual = Math.max(0, toNumber(p.employer_hsa_annual));
+  const annualHsaTotal = annualHsaEmployee + employerHsaAnnual;
+
+  const annualHealthFsa = healthFsa * periods;
+  const annualDepCareFsa = depCareFsa * periods;
+  const annualOtherPreTax = otherPreTax * periods;
+  const annualPreTaxTotal = preTaxPerPaycheck * periods;
+
+  const annualFedTaxFromBase = fedTax * periods;
+  const annualStateTaxFromBase = stateTax * periods;
+  const annualFicaFromBase = fica * periods;
+  const annualTaxesFromBase = taxesPerPaycheck * periods;
+
+  const annualEsppContribution = esppPerCheck * periods;
+  const discountDecimal = esppDiscountPct / 100;
+  const esppMaxCashContrib =
+    discountDecimal < 1
+      ? IRS_2026_LIMITS.esppFmvCap * (1 - discountDecimal)
+      : IRS_2026_LIMITS.esppFmvCap;
+  const annualEsppImpliedGain =
+    discountDecimal > 0 && discountDecimal < 1
+      ? annualEsppContribution * (discountDecimal / (1 - discountDecimal))
+      : 0;
+
+  const annualOtherPostTax = otherPostTax * periods;
+  const annualPostTaxTotal = postTaxPerPaycheck * periods;
+
+  const bonusWithholdingPct = Math.max(0, Math.min(55, toNumber(p.bonus_withholding_pct)));
+  const rsuWithholdingPct = Math.max(0, Math.min(55, toNumber(p.rsu_withholding_pct)));
+  const estFedWithheldFromSupplemental =
+    bonusAnnual * (bonusWithholdingPct / 100) + rsuAnnual * (rsuWithholdingPct / 100);
+
+  const totalAnnualWealthBuilding =
+    Math.min(annualEmployee401kProjected, IRS_2026_LIMITS.employee401k) +
+    employerMatchAnnual +
+    annualAfterTax401k +
+    annualHsaTotal +
+    annualEsppContribution +
+    annualEsppImpliedGain;
+
+  const totalCompWithEmployerBenefits =
+    annualCashAndEquityComp + employerMatchAnnual + employerHsaAnnual + annualEsppImpliedGain;
+
+  return {
+    baseSalary,
+    bonusAnnual,
+    rsuAnnual,
+    ytd401k,
+    hasMegaBackdoor,
+    esppEnrolled,
+    payFrequency: p.pay_frequency,
+    payFrequencyLabel: freqMeta.label,
+    periods,
+    has401kTrueUp: Boolean(p.has_401k_true_up),
+
+    // Per paycheck
+    basePerPaycheck,
+    otherEarningsPerPaycheck,
+    grossPerPaycheck,
+    preTaxPerPaycheck,
+    section125PreTaxPerPaycheck,
+    taxablePerPaycheck,
+    taxesPerPaycheck,
+    postTaxPerPaycheck,
+    netPerPaycheck,
+    hasPaystubDeductions: preTaxPerPaycheck > 0 || taxesPerPaycheck > 0 || postTaxPerPaycheck > 0,
+    hasTaxWithholding: taxesPerPaycheck > 0,
+    hasFedWithholding: fedTax > 0,
+    estimatedFicaPerPaycheck,
+    effectiveWithholdingPct,
+
+    // Itemized per paycheck
+    trad401k,
+    medical,
+    dentalVision,
+    hsaEmployee,
+    healthFsa,
+    depCareFsa,
+    otherPreTax,
+    fedTax,
+    stateTax,
+    fica,
+    roth401k,
+    afterTax401k,
+    esppPerCheck,
+    otherPostTax,
+
+    // Monthly & annual
+    annualBaseWithOther,
+    annualCashAndEquityComp,
+    annualNetBase,
+    avgMonthlyNetBase,
+    typicalTwoCheckMonthlyNet,
+    extraBiweeklyPaychecksAnnual,
+
+    // Annualized items & caps
+    annualTrad401k,
+    annualRoth401k,
+    annualEmployee401kProjected,
+    annualAfterTax401k,
+    employerMatchAnnual,
+    total401k415cProjected,
+    remaining401kByYtd,
+    remaining415cRoom,
+    maxPerCheck401kTarget,
+    early401kMaxOutCheck,
+
+    annualMedical,
+    annualDentalVision,
+    annualHealthPremiums,
+    annualHsaEmployee,
+    employerHsaAnnual,
+    annualHsaTotal,
+    annualHealthFsa,
+    annualDepCareFsa,
+    annualOtherPreTax,
+    annualPreTaxTotal,
+
+    annualFedTaxFromBase,
+    annualStateTaxFromBase,
+    annualFicaFromBase,
+    annualTaxesFromBase,
+
+    annualEsppContribution,
+    esppDiscountPct,
+    esppMaxCashContrib,
+    annualEsppImpliedGain,
+    annualOtherPostTax,
+    annualPostTaxTotal,
+
+    bonusWithholdingPct,
+    rsuWithholdingPct,
+    estFedWithheldFromSupplemental,
+    totalAnnualWealthBuilding,
+    totalCompWithEmployerBenefits,
+  };
+}
+
+export function computeHouseholdPaystubSummary(profileForm, names = { primary_name: 'Me', spouse_name: 'Wife' }) {
+  const details = normalizePaystubDetails(profileForm?.paystub_details);
+
+  const primary = computePersonPaystub(
+    {
+      baseSalary: profileForm?.primary_base_salary,
+      bonusAnnual: profileForm?.primary_bonus_annual,
+      rsuAnnual: profileForm?.primary_rsu_annual,
+      ytd401k: profileForm?.primary_401k_ytd,
+      hasMegaBackdoor: profileForm?.primary_has_mega_backdoor,
+      esppEnrolled: profileForm?.primary_espp_enrolled,
+    },
+    details.primary
+  );
+
+  const spouse = computePersonPaystub(
+    {
+      baseSalary: profileForm?.spouse_base_salary,
+      bonusAnnual: profileForm?.spouse_bonus_annual,
+      rsuAnnual: profileForm?.spouse_rsu_annual,
+      ytd401k: profileForm?.spouse_401k_ytd,
+      hasMegaBackdoor: profileForm?.spouse_has_mega_backdoor,
+      esppEnrolled: profileForm?.spouse_espp_enrolled,
+    },
+    details.spouse
+  );
+
+  const filingStatus = profileForm?.filing_status || 'married_filing_jointly';
+  const hsaPlanType = profileForm?.hsa_plan_type || 'none';
+  const hsaYtd = Math.max(0, toNumber(profileForm?.hsa_contrib_ytd));
+
+  const combinedGrossComp = primary.annualCashAndEquityComp + spouse.annualCashAndEquityComp;
+  const combinedTotalCompWithBenefits =
+    primary.totalCompWithEmployerBenefits + spouse.totalCompWithEmployerBenefits;
+  const combinedAnnualPreTax = primary.annualPreTaxTotal + spouse.annualPreTaxTotal;
+  const combinedAnnualTaxesFromBase = primary.annualTaxesFromBase + spouse.annualTaxesFromBase;
+  const combinedAnnualPostTax = primary.annualPostTaxTotal + spouse.annualPostTaxTotal;
+  const combinedAnnualNetBase = primary.annualNetBase + spouse.annualNetBase;
+  const combinedAvgMonthlyNetBase = combinedAnnualNetBase / 12;
+  const combinedTypicalMonthlyNet =
+    primary.typicalTwoCheckMonthlyNet + spouse.typicalTwoCheckMonthlyNet;
+  const combinedWealthBuildingAnnual =
+    primary.totalAnnualWealthBuilding + spouse.totalAnnualWealthBuilding;
+
+  const hasAnyTaxWithholding = primary.hasTaxWithholding || spouse.hasTaxWithholding;
+  const hasAnyFedWithholding = primary.hasFedWithholding || spouse.hasFedWithholding;
+
+  const hsaLimit =
+    hsaPlanType === 'family'
+      ? IRS_2026_LIMITS.hsaFamily
+      : hsaPlanType === 'self'
+      ? IRS_2026_LIMITS.hsaSelf
+      : 0;
+  const hsaProjectedTotal = primary.annualHsaTotal + spouse.annualHsaTotal;
+  const hsaRemainingByYtd = Math.max(0, hsaLimit - hsaYtd);
+
+  const depCareFsaLimit =
+    filingStatus === 'married_filing_separately'
+      ? IRS_2026_LIMITS.depCareFsaMfs
+      : IRS_2026_LIMITS.depCareFsaMfj;
+  const depCareFsaProjectedTotal = primary.annualDepCareFsa + spouse.annualDepCareFsa;
+
+  const fedTax = estimate2026FederalTax(combinedGrossComp, combinedAnnualPreTax, filingStatus);
+
+  const projectedTotalFedWithheld =
+    primary.annualFedTaxFromBase +
+    spouse.annualFedTaxFromBase +
+    primary.estFedWithheldFromSupplemental +
+    spouse.estFedWithheldFromSupplemental;
+
+  const estFedWithholdingDiff = hasAnyFedWithholding
+    ? projectedTotalFedWithheld - fedTax.estimatedTax
+    : null;
+
+  const marginalDecimal = fedTax.marginalRatePct / 100;
+  const computeSupplementalGap = (p) =>
+    p.bonusAnnual * Math.max(0, marginalDecimal - p.bonusWithholdingPct / 100) +
+    p.rsuAnnual * Math.max(0, marginalDecimal - p.rsuWithholdingPct / 100);
+  const estSupplementalWithholdingGap =
+    fedTax.marginalRatePct > 0
+      ? computeSupplementalGap(primary) + computeSupplementalGap(spouse)
+      : 0;
+
+  // Smart household paystub & IRS cap alerts
+  const alerts = [];
+  const earners = [
+    { label: names?.primary_name || 'Primary', data: primary },
+    { label: names?.spouse_name || 'Spouse', data: spouse },
+  ];
+
+  for (const { label, data } of earners) {
+    if (data.early401kMaxOutCheck && data.early401kMaxOutCheck < data.periods) {
+      if (!data.has401kTrueUp && data.employerMatchAnnual > 0) {
+        alerts.push({
+          level: 'danger',
+          title: `${label}: Early 401(k) max-out risk (no employer true-up)`,
+          detail: `At $${Math.round(data.trad401k + data.roth401k).toLocaleString()}/check, ${label} hits the $24,500 IRS cap on paycheck #${data.early401kMaxOutCheck} of ${data.periods} and could forfeit employer match on the remaining ${data.periods - data.early401kMaxOutCheck} checks. Target ~$${Math.floor(data.maxPerCheck401kTarget).toLocaleString()}/check.`,
+        });
+      } else {
+        alerts.push({
+          level: 'info',
+          title: `${label}: Projected 401(k) hits $24,500 cap on check #${data.early401kMaxOutCheck}`,
+          detail: `Run rate ($${Math.round(data.annualEmployee401kProjected).toLocaleString()}/yr) reaches the $24,500 IRS elective limit before year-end; payroll will auto-cap unless Mega Backdoor after-tax spillover is enabled.`,
+        });
+      }
+    }
+
+    if (data.annualEsppContribution > data.esppMaxCashContrib + 25) {
+      alerts.push({
+        level: 'warn',
+        title: `${label}: ESPP contribution above §423 $25,000 FMV limit`,
+        detail: `Projected ESPP payroll deduction ($${Math.round(data.annualEsppContribution).toLocaleString()}/yr) exceeds the ~$${Math.round(data.esppMaxCashContrib).toLocaleString()} max cash cap at a ${data.esppDiscountPct}% discount; payroll typically refunds or caps excess.`,
+      });
+    }
+  }
+
+  if (hsaLimit > 0 && hsaProjectedTotal > hsaLimit + 1) {
+    alerts.push({
+      level: 'danger',
+      title: 'Household HSA projected over 2026 IRS limit',
+      detail: `Combined employee + employer HSA run rate ($${Math.round(hsaProjectedTotal).toLocaleString()}/yr) exceeds your $${hsaLimit.toLocaleString()} limit. Remember employer HSA seed counts toward the IRS cap!`,
+    });
+  }
+
+  const combinedHealthFsa = primary.annualHealthFsa + spouse.annualHealthFsa;
+  if ((hsaLimit > 0 || hsaProjectedTotal > 0) && combinedHealthFsa > 0) {
+    alerts.push({
+      level: 'warn',
+      title: 'HSA + Healthcare FSA active simultaneously',
+      detail: `Verify your Healthcare FSA ($${Math.round(combinedHealthFsa).toLocaleString()}/yr) is a Limited-Purpose FSA (dental/vision only); a general-purpose FSA disqualifies HSA eligibility for both spouses.`,
+    });
+  }
+
+  if (depCareFsaProjectedTotal > depCareFsaLimit + 1) {
+    alerts.push({
+      level: 'danger',
+      title: 'Dependent Care FSA exceeds IRS household cap',
+      detail: `Combined DCFSA ($${Math.round(depCareFsaProjectedTotal).toLocaleString()}/yr) exceeds the $${depCareFsaLimit.toLocaleString()} household cap — excess becomes taxable income.`,
+    });
+  }
+
+  if (estSupplementalWithholdingGap >= 500) {
+    const rateNotes = [];
+    if (primary.rsuAnnual > 0) rateNotes.push(`${names?.primary_name || 'Primary'} RSU ${primary.rsuWithholdingPct}%`);
+    if (primary.bonusAnnual > 0) rateNotes.push(`${names?.primary_name || 'Primary'} bonus ${primary.bonusWithholdingPct}%`);
+    if (spouse.rsuAnnual > 0) rateNotes.push(`${names?.spouse_name || 'Spouse'} RSU ${spouse.rsuWithholdingPct}%`);
+    if (spouse.bonusAnnual > 0) rateNotes.push(`${names?.spouse_name || 'Spouse'} bonus ${spouse.bonusWithholdingPct}%`);
+    alerts.push({
+      level: 'warn',
+      title: `Bonus / RSU supplemental withholding gap (~$${Math.round(estSupplementalWithholdingGap).toLocaleString()})`,
+      detail: `Your est. marginal federal bracket is ${fedTax.marginalRatePct}%, above supplemental withholding (${rateNotes.join(', ') || '22% default'}). Consider extra W-4 withholding or quarterly safe-harbor payments.`,
+    });
+  }
+
+  if (combinedGrossComp > 0 && !hasAnyTaxWithholding) {
+    alerts.push({
+      level: 'info',
+      title: 'Add paycheck tax & benefit deductions for exact Net Deposit',
+      detail:
+        'Open the individual Paystub tabs above to enter Federal, State, FICA, Medical/Dental, 401(k), HSA, and ESPP per paycheck — then sync Monthly Net Take-Home directly to the Expenses tab.',
+    });
+  }
+
+  return {
+    primary,
+    spouse,
+    combinedGrossComp,
+    combinedTotalCompWithBenefits,
+    combinedAnnualPreTax,
+    combinedAnnualTaxesFromBase,
+    combinedAnnualPostTax,
+    combinedAnnualNetBase,
+    combinedAvgMonthlyNetBase,
+    combinedTypicalMonthlyNet,
+    combinedWealthBuildingAnnual,
+    hasAnyTaxWithholding,
+    hasAnyFedWithholding,
+    hsaPlanType,
+    hsaYtd,
+    hsaLimit,
+    hsaProjectedTotal,
+    hsaRemainingByYtd,
+    depCareFsaLimit,
+    depCareFsaProjectedTotal,
+    fedTax,
+    projectedTotalFedWithheld,
+    estFedWithholdingDiff,
+    estSupplementalWithholdingGap,
+    alerts,
+  };
+}
+
+
