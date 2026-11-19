@@ -10,38 +10,144 @@ const corsHeaders = {
 
 const ALLOWED_MODELS = [
   {
+    id: 'claude-haiku-5-5',
+    provider: 'anthropic',
+    label: 'Claude Haiku 5.5',
+    badge: 'Default • Anthropic',
+    description: 'Latest Claude Haiku — fast, crisp financial & tax analysis',
+  },
+  {
+    id: 'claude-haiku-4-5',
+    provider: 'anthropic',
+    label: 'Claude Haiku 4.5',
+    badge: 'Fallback • Anthropic',
+    description: 'Previous-gen Claude Haiku fallback',
+  },
+  {
+    id: 'claude-sonnet-5-5',
+    provider: 'anthropic',
+    label: 'Claude Sonnet 5.5',
+    badge: 'Deep CFO • Anthropic',
+    description: 'Flagship Anthropic reasoning for complex tax & wealth strategy',
+  },
+  {
     id: 'gemini-4-hydrogen',
+    provider: 'gemini',
     label: 'Gemini 4 Hydrogen',
-    badge: 'Free • 20/day',
-    description: 'Gemini 4 workhorse reasoning model — default Free Tier model',
+    badge: 'Free Backup',
+    description: 'Free-tier Gemini 4 backup model',
   },
   {
     id: 'gemini-3.8-flash',
+    provider: 'gemini',
     label: 'Gemini 3.8 Flash',
-    badge: 'Free • 20/day',
+    badge: 'Free Backup',
     description: 'Fast Gemini 3.8 Flash model on Free Tier',
   },
   {
     id: 'gemini-3.5-flash-lite',
+    provider: 'gemini',
     label: 'Gemini 3.5 Flash-Lite',
-    badge: 'Free • 500/day',
+    badge: 'Free Backup',
     description: 'High-quota fast workhorse on Free Tier (500 req/day)',
   },
   {
     id: 'gemini-3.1-flash-lite',
+    provider: 'gemini',
     label: 'Gemini 3.1 Flash-Lite',
-    badge: 'Free • 500/day',
+    badge: 'Free Backup',
     description: 'Secondary high-quota fast fallback on Free Tier (500 req/day)',
   },
   {
     id: 'gemma-4-31b-it',
+    provider: 'gemini',
     label: 'Gemma 4 31B',
-    badge: 'Free • 14.4K/day',
+    badge: 'Free Backup',
     description: 'Open 31B backup model with ultra-high Free Tier quota (14.4K req/day)',
   },
 ] as const;
 
 const ALLOWED_MODEL_IDS = new Set<string>(ALLOWED_MODELS.map((m) => m.id));
+
+async function callAnthropicModel(
+  apiKey: string,
+  targetModel: string,
+  systemInstruction: string,
+  cleanedMessages: Array<{ role: string; text: string }>
+) {
+  // Normalize into strictly alternating user/assistant turns starting with user
+  const normalized: Array<{ role: 'user' | 'assistant'; text: string }> = [];
+  for (const m of cleanedMessages) {
+    const role = m.role === 'assistant' ? 'assistant' : 'user';
+    const text = m.text.trim();
+    if (!text) continue;
+    if (normalized.length === 0 && role === 'assistant') {
+      continue;
+    }
+    const prev = normalized[normalized.length - 1];
+    if (prev && prev.role === role) {
+      prev.text = `${prev.text}\n\n${text}`;
+    } else {
+      normalized.push({ role, text });
+    }
+  }
+
+  if (normalized.length === 0) {
+    throw new Error('Please include at least one user message.');
+  }
+
+  const anthropicMessages = normalized.map((m) => ({
+    role: m.role,
+    content: [{ type: 'text', text: m.text }],
+  }));
+
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2026-10-21',
+    },
+    body: JSON.stringify({
+      model: targetModel,
+      max_tokens: 4096,
+      system: [{ type: 'text', text: systemInstruction }],
+      messages: anthropicMessages,
+    }),
+    signal: AbortSignal.timeout(40000),
+  });
+
+  const json = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    const errMsg =
+      (json as { error?: { message?: string } })?.error?.message ||
+      resp.statusText ||
+      'Anthropic API request failed';
+    throw new Error(`${resp.status} ${errMsg}`);
+  }
+
+  const contentBlocks = Array.isArray((json as { content?: unknown }).content)
+    ? ((json as { content: Array<{ type?: string; text?: string }> }).content)
+    : [];
+  const replyText = contentBlocks
+    .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text!)
+    .join('\n')
+    .trim();
+
+  const rawUsage = (json as { usage?: Record<string, unknown> })?.usage || {};
+  const inputTokens = Number(rawUsage.input_net_tokens ?? rawUsage.input_tokens ?? 0);
+  const outputTokens = Number(rawUsage.output_tokens ?? 0);
+
+  return {
+    reply: replyText,
+    usage: {
+      total_tokens: inputTokens + outputTokens,
+      input_tokens: inputTokens,
+      output_tokens: outputTokens,
+    },
+  };
+}
 
 function num(v: unknown): number {
   const n = Number(v);
@@ -400,22 +506,19 @@ Deno.serve(async (req: Request) => {
     }
 
     const body = await req.json().catch(() => ({}));
-    const apiKey = (Deno.env.get('GEMINI_API_KEY') || '').trim();
+    const anthropicKey = (Deno.env.get('ANTHROPIC_API_KEY') || '').trim();
+    const geminiKey = (Deno.env.get('GEMINI_API_KEY') || '').trim();
 
-    // Quick status check so the UI knows whether GEMINI_API_KEY is wired up
+    // Quick status check so the UI knows which provider secrets are wired up
     if (body?.action === 'status') {
       return jsonResp({
-        configured: Boolean(apiKey),
-        defaultModel: 'gemini-4-hydrogen',
+        configured: Boolean(anthropicKey || geminiKey),
+        providers: {
+          anthropic: Boolean(anthropicKey),
+          gemini: Boolean(geminiKey),
+        },
+        defaultModel: 'claude-haiku-5-5',
         models: ALLOWED_MODELS,
-      });
-    }
-
-    if (!apiKey) {
-      return jsonResp({
-        configured: false,
-        error:
-          'GEMINI_API_KEY is not configured yet. Add it as a Supabase Edge Function Secret to activate the Gemini 4 AI Advisor.',
       });
     }
 
@@ -433,10 +536,29 @@ Deno.serve(async (req: Request) => {
       return jsonResp({ error: 'Please send at least one message.' }, 400);
     }
 
-    const requestedModel = String(body?.model || 'gemini-4-hydrogen');
-    const model = ALLOWED_MODEL_IDS.has(requestedModel) ? requestedModel : 'gemini-4-hydrogen';
+    const requestedModel = String(body?.model || 'claude-haiku-5-5');
+    const model = ALLOWED_MODEL_IDS.has(requestedModel) ? requestedModel : 'claude-haiku-5-5';
+    const provider = model.startsWith('claude-') ? 'anthropic' : 'gemini';
     const scope = String(body?.scope || 'combined');
     const includeNotes = Boolean(body?.includeNotes);
+
+    if (provider === 'anthropic' && !anthropicKey) {
+      return jsonResp({
+        configured: false,
+        missingProvider: 'anthropic',
+        error:
+          'ANTHROPIC_API_KEY is not configured yet in Supabase Edge Function Secrets.',
+      });
+    }
+
+    if (provider === 'gemini' && !geminiKey) {
+      return jsonResp({
+        configured: false,
+        missingProvider: 'gemini',
+        error:
+          'GEMINI_API_KEY is not configured in Supabase Edge Function Secrets.',
+      });
+    }
 
     // Pull live vault records strictly under the caller's JWT (single-owner + AAL2 RLS enforced)
     const [accRes, holdRes, promoRes, expRes, billRes, budRes, hhRes, taxRes] = await Promise.all([
@@ -481,13 +603,74 @@ Deno.serve(async (req: Request) => {
       jsonContext,
     ].join('\n');
 
-    // Build stateless multi-turn Interactions API steps (store: false)
+    if (provider === 'anthropic') {
+      let usedModel = model;
+      let fallbackNote = '';
+      let result: { reply: string; usage: { total_tokens: number; input_tokens: number; output_tokens: number } } | null = null;
+      const attempts: Array<{ model: string; error: string }> = [];
+
+      try {
+        result = await callAnthropicModel(anthropicKey, model, systemInstruction, cleanedMessages);
+      } catch (primaryErr) {
+        const primaryMsg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+        console.error(`[finance-advisor] Primary Anthropic model ${model} failed:`, primaryMsg);
+        attempts.push({ model, error: primaryMsg });
+
+        const shouldFallback =
+          /404|429|500|502|503|504|529|overloaded|not_found|not found|timeout|timed out|AbortError/i.test(
+            primaryMsg
+          );
+
+        if (shouldFallback && model !== 'claude-haiku-4-5') {
+          try {
+            result = await callAnthropicModel(
+              anthropicKey,
+              'claude-haiku-4-5',
+              systemInstruction,
+              cleanedMessages
+            );
+            usedModel = 'claude-haiku-4-5';
+            fallbackNote = `${model} was temporarily unavailable or unsupported on this endpoint. Answered automatically using claude-haiku-4-5.`;
+          } catch (fbErr) {
+            const fbMsg = fbErr instanceof Error ? fbErr.message : String(fbErr);
+            console.error('[finance-advisor] Fallback claude-haiku-4-5 failed:', fbMsg);
+            attempts.push({ model: 'claude-haiku-4-5', error: fbMsg });
+          }
+        }
+
+        if (!result) {
+          const detailText =
+            attempts.length > 1
+              ? 'Anthropic API error across models:\n' +
+                attempts.map((a) => `• ${a.model}: ${a.error}`).join('\n')
+              : `Anthropic API error (${model}): ${primaryMsg}`;
+          return jsonResp({
+            configured: true,
+            ok: false,
+            error: detailText,
+          });
+        }
+      }
+
+      return jsonResp({
+        configured: true,
+        ok: true,
+        reply: result.reply || 'No response text was returned by Claude.',
+        model: usedModel,
+        requestedModel: model,
+        fallbackNote: fallbackNote || undefined,
+        usage: result.usage,
+        contextStats: stats,
+      });
+    }
+
+    // Build stateless multi-turn Interactions API steps (store: false) for Gemini backup
     const steps = cleanedMessages.map((m) => ({
       type: m.role === 'assistant' ? ('model_output' as const) : ('user_input' as const),
       content: [{ type: 'text' as const, text: m.text }],
     }));
 
-    const ai = new GoogleGenAI({ apiKey });
+    const ai = new GoogleGenAI({ apiKey: geminiKey });
 
     const callModel = async (targetModel: string) => {
       return await ai.interactions.create(

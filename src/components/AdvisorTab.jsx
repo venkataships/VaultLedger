@@ -24,28 +24,25 @@ import { formatCurrency, toNumber } from '../lib/finance';
 
 const MODELS = [
   {
+    id: 'claude-haiku-5-5',
+    provider: 'anthropic',
+    label: 'Claude Haiku 5.5',
+    badge: 'Default • Fast',
+    desc: 'Latest Anthropic Haiku — fast, cost-efficient CFO & tax advisor',
+  },
+  {
+    id: 'claude-sonnet-5-5',
+    provider: 'anthropic',
+    label: 'Claude Sonnet 5.5',
+    badge: 'Deep Strategy',
+    desc: 'Strongest Anthropic reasoning for complex multi-year tax & wealth plans',
+  },
+  {
     id: 'gemini-4-hydrogen',
+    provider: 'gemini',
     label: 'Gemini 4 Hydrogen',
-    badge: 'Default • Free',
-    desc: 'Best Free-Tier Gemini 4 reasoning (20 req/day; auto-falls back if busy)',
-  },
-  {
-    id: 'gemini-3.8-flash',
-    label: 'Gemini 3.8 Flash',
-    badge: 'Fast • Free',
-    desc: 'Fast Gemini 3.8 model on Free Tier (20 req/day)',
-  },
-  {
-    id: 'gemini-3.5-flash-lite',
-    label: '3.5 Flash-Lite',
-    badge: '500/day • Free',
-    desc: 'High-quota fast model on Free Tier (500 req/day)',
-  },
-  {
-    id: 'gemma-4-31b-it',
-    label: 'Gemma 4 31B',
-    badge: 'Backup • Free',
-    desc: 'Ultra-high-quota open model on Free Tier (14K req/day)',
+    badge: 'Free Backup',
+    desc: 'Free-tier Gemini 4 backup model',
   },
 ];
 
@@ -280,11 +277,12 @@ export default function AdvisorTab({
   onChangeActiveThreadId,
   onTaxProfileSaved,
 }) {
-  const [selectedModel, setSelectedModel] = useState('gemini-4-hydrogen');
+  const [selectedModel, setSelectedModel] = useState('claude-haiku-5-5');
   const [includeNotes, setIncludeNotes] = useState(false);
   const [advisorStatus, setAdvisorStatus] = useState({
     checking: true,
     configured: false,
+    providers: { anthropic: false, gemini: false },
     error: '',
   });
 
@@ -368,12 +366,17 @@ export default function AdvisorTab({
       setAdvisorStatus({
         checking: false,
         configured: Boolean(data?.configured),
+        providers: {
+          anthropic: Boolean(data?.providers?.anthropic),
+          gemini: Boolean(data?.providers?.gemini),
+        },
         error: '',
       });
     } catch (err) {
       setAdvisorStatus({
         checking: false,
         configured: false,
+        providers: { anthropic: false, gemini: false },
         error: err?.message || 'Unable to reach finance-advisor Edge Function.',
       });
     }
@@ -559,6 +562,9 @@ export default function AdvisorTab({
     }
   };
 
+  const selectedProvider = selectedModel.startsWith('claude-') ? 'anthropic' : 'gemini';
+  const isSelectedConfigured = Boolean(advisorStatus.providers?.[selectedProvider]);
+
   const sendMessage = async (textToSend, customTitle = '') => {
     const clean = String(textToSend || '').trim();
     if (!clean || sending) return;
@@ -634,13 +640,23 @@ export default function AdvisorTab({
       }
 
       if (data?.configured === false) {
-        setAdvisorStatus({ checking: false, configured: false, error: '' });
-        setChatError(data?.error || 'GEMINI_API_KEY is not configured yet.');
+        const missing = data?.missingProvider || selectedProvider;
+        setAdvisorStatus((prev) => ({
+          ...prev,
+          checking: false,
+          providers: { ...prev.providers, [missing]: false },
+        }));
+        setChatError(
+          data?.error ||
+            (missing === 'anthropic'
+              ? 'ANTHROPIC_API_KEY is not configured yet.'
+              : 'GEMINI_API_KEY is not configured yet.')
+        );
         return;
       }
 
       if (data?.ok === false || data?.error) {
-        throw new Error(data.error || 'Gemini Advisor returned an error.');
+        throw new Error(data.error || 'AI Advisor returned an error.');
       }
 
       const replyText = data?.reply || 'No response returned.';
@@ -737,14 +753,14 @@ export default function AdvisorTab({
             <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-400">
               <Sparkles className="h-4 w-4" />
             </div>
-            <h1 className="text-base font-semibold text-zinc-100">Gemini 4 Family CFO & Tax Advisor</h1>
+            <h1 className="text-base font-semibold text-zinc-100">AI Family CFO & Tax Advisor</h1>
             <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300">
               <Lock className="h-2.5 w-2.5" />
-              Gemini: store=false
+              API: No Training / Zero PII
             </span>
             <span className="inline-flex items-center gap-1 rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 text-[10px] font-medium text-sky-300">
               <ShieldCheck className="h-2.5 w-2.5" />
-              Zero PII • VINs & Emails Stripped
+              VINs & Emails Stripped
             </span>
           </div>
           <p className="mt-1 text-xs text-zinc-400">
@@ -773,8 +789,8 @@ export default function AdvisorTab({
         </div>
       </div>
 
-      {/* API Key Setup Card (shown until GEMINI_API_KEY secret is added in Supabase) */}
-      {!advisorStatus.checking && !advisorStatus.configured && (
+      {/* API Key Setup Card (shown until the selected provider's secret is added in Supabase) */}
+      {!advisorStatus.checking && !isSelectedConfigured && (
         <div className="rounded-xl border border-amber-500/35 bg-amber-500/5 p-5 text-xs">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="flex items-start gap-3">
@@ -783,40 +799,86 @@ export default function AdvisorTab({
               </div>
               <div>
                 <h2 className="text-sm font-semibold text-amber-200">
-                  Connect Your Gemini API Key (2-Minute One-Time Setup)
+                  {selectedProvider === 'anthropic'
+                    ? 'Connect Your Anthropic API Key (2-Minute One-Time Setup)'
+                    : 'Connect Your Gemini API Key (2-Minute One-Time Setup)'}
                 </h2>
                 <p className="mt-1 max-w-2xl text-zinc-300 leading-relaxed">
                   Your API key is stored exclusively inside <strong>Supabase Edge Function Secrets</strong> — never in GitHub, never in your browser, and always protected behind your single-owner 2FA login.
                 </p>
 
-                <ol className="mt-3 list-decimal space-y-1.5 pl-4 text-zinc-300">
-                  <li>
-                    Generate a Gemini API key at{' '}
-                    <a
-                      href="https://aistudio.google.com/apikey"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 font-medium text-emerald-300 underline hover:text-emerald-200"
-                    >
-                      Google AI Studio (aistudio.google.com/apikey)
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  </li>
-                  <li>
-                    Open your{' '}
-                    <a
-                      href="https://supabase.com/dashboard/project/ucrbocknokusjjayrgpf/functions/secrets"
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1 font-medium text-sky-300 underline hover:text-sky-200"
-                    >
-                      Supabase Edge Function Secrets
-                      <ExternalLink className="h-3 w-3" />
-                    </a>{' '}
-                    and add a secret named <code className="rounded bg-zinc-900 px-1.5 py-0.5 font-mono text-amber-200">GEMINI_API_KEY</code>.
-                  </li>
-                  <li>Click <strong>Re-check Connection</strong> below — chat unlocks instantly.</li>
-                </ol>
+                {selectedProvider === 'anthropic' ? (
+                  <ol className="mt-3 list-decimal space-y-1.5 pl-4 text-zinc-300">
+                    <li>
+                      Create an API key in the{' '}
+                      <a
+                        href="https://console.anthropic.com/settings/keys"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 font-medium text-emerald-300 underline hover:text-emerald-200"
+                      >
+                        Anthropic Console (console.anthropic.com)
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </li>
+                    <li>
+                      Open your{' '}
+                      <a
+                        href="https://supabase.com/dashboard/project/ucrbocknokusjjayrgpf/functions/secrets"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 font-medium text-sky-300 underline hover:text-sky-200"
+                      >
+                        Supabase Edge Function Secrets
+                        <ExternalLink className="h-3 w-3" />
+                      </a>{' '}
+                      and add a secret named{' '}
+                      <code className="rounded bg-zinc-900 px-1.5 py-0.5 font-mono text-amber-200">
+                        ANTHROPIC_API_KEY
+                      </code>
+                      .
+                    </li>
+                    <li>
+                      Click <strong>Re-check Connection</strong> below
+                      {advisorStatus.providers?.gemini
+                        ? ' — or switch to Gemini 4 Hydrogen above to chat right away.'
+                        : ' — chat unlocks instantly.'}
+                    </li>
+                  </ol>
+                ) : (
+                  <ol className="mt-3 list-decimal space-y-1.5 pl-4 text-zinc-300">
+                    <li>
+                      Generate a Gemini API key at{' '}
+                      <a
+                        href="https://aistudio.google.com/apikey"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 font-medium text-emerald-300 underline hover:text-emerald-200"
+                      >
+                        Google AI Studio (aistudio.google.com/apikey)
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    </li>
+                    <li>
+                      Open your{' '}
+                      <a
+                        href="https://supabase.com/dashboard/project/ucrbocknokusjjayrgpf/functions/secrets"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 font-medium text-sky-300 underline hover:text-sky-200"
+                      >
+                        Supabase Edge Function Secrets
+                        <ExternalLink className="h-3 w-3" />
+                      </a>{' '}
+                      and add a secret named{' '}
+                      <code className="rounded bg-zinc-900 px-1.5 py-0.5 font-mono text-amber-200">
+                        GEMINI_API_KEY
+                      </code>
+                      .
+                    </li>
+                    <li>Click <strong>Re-check Connection</strong> below — chat unlocks instantly.</li>
+                  </ol>
+                )}
 
                 {advisorStatus.error && (
                   <p className="mt-2 text-rose-300">{advisorStatus.error}</p>
@@ -1213,13 +1275,15 @@ export default function AdvisorTab({
             <span className="inline-flex items-center gap-1.5">
               <span
                 className={`h-2 w-2 rounded-full ${
-                  advisorStatus.configured ? 'bg-emerald-400' : 'bg-amber-400'
+                  isSelectedConfigured ? 'bg-emerald-400' : 'bg-amber-400'
                 }`}
               />
               {advisorStatus.checking
-                ? 'Checking Gemini connection…'
-                : advisorStatus.configured
+                ? 'Checking AI connection…'
+                : isSelectedConfigured
                 ? `Connected • ${MODELS.find((m) => m.id === selectedModel)?.label}`
+                : selectedProvider === 'anthropic'
+                ? 'Awaiting ANTHROPIC_API_KEY secret'
                 : 'Awaiting GEMINI_API_KEY secret'}
             </span>
             <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-300">
@@ -1351,7 +1415,7 @@ export default function AdvisorTab({
                   <button
                     key={q.title}
                     type="button"
-                    disabled={!advisorStatus.configured || sending}
+                    disabled={!isSelectedConfigured || sending}
                     onClick={() => sendMessage(q.prompt, q.title)}
                     className="group rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 text-left transition hover:border-emerald-500/40 hover:bg-zinc-900/80 disabled:cursor-not-allowed disabled:opacity-50"
                   >
@@ -1383,7 +1447,9 @@ export default function AdvisorTab({
                       <div className="flex items-center justify-between gap-4">
                         <span className="inline-flex items-center gap-1 font-medium text-emerald-300">
                           <Sparkles className="h-3 w-3" />
-                          {MODELS.find((x) => x.id === m.model)?.label || m.model || 'Gemini 4'}
+                          {MODELS.find((x) => x.id === m.model)?.label ||
+                            (m.model === 'claude-haiku-4-5' ? 'Claude Haiku 4.5' : m.model) ||
+                            'AI Advisor'}
                         </span>
                         {m.usage?.total_tokens && (
                           <span className="font-mono">{m.usage.total_tokens.toLocaleString()} tokens</span>
@@ -1435,10 +1501,12 @@ export default function AdvisorTab({
           <div className="flex items-end gap-2">
             <textarea
               rows={2}
-              disabled={!advisorStatus.configured || sending}
+              disabled={!isSelectedConfigured || sending}
               placeholder={
-                advisorStatus.configured
+                isSelectedConfigured
                   ? 'Ask about tax optimization, RSU diversification, 0% promo payoff, mortgage vs. invest, or covered call / CSP sizing…'
+                  : selectedProvider === 'anthropic'
+                  ? 'Connect your ANTHROPIC_API_KEY in Supabase Secrets above to start chatting…'
                   : 'Connect your GEMINI_API_KEY in Supabase Secrets above to start chatting…'
               }
               value={draftInput}
@@ -1453,7 +1521,7 @@ export default function AdvisorTab({
             />
             <button
               type="submit"
-              disabled={!advisorStatus.configured || sending || !draftInput.trim()}
+              disabled={!isSelectedConfigured || sending || !draftInput.trim()}
               className="inline-flex h-10 shrink-0 items-center gap-1.5 rounded-xl bg-emerald-500 px-4 text-xs font-semibold text-zinc-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
             >
               <Send className="h-3.5 w-3.5" />
