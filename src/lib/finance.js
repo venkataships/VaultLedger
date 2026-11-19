@@ -84,12 +84,18 @@ export const ACCOUNT_CATEGORIES = {
   },
   other_asset: {
     key: 'other_asset',
-    label: 'Other Assets',
-    shortLabel: 'Other Assets',
+    label: 'Property, Gold & Vehicles',
+    shortLabel: 'Real Assets',
     isLiability: false,
     accent: 'teal',
     colorHex: '#14b8a6',
-    subtypes: ['Vehicle Equity', 'Security Deposit', 'Receivable', 'Other Asset'],
+    subtypes: [
+      'US Home / Real Estate',
+      'India Property / Land',
+      'Physical Gold / Jewelry',
+      'Vehicle / Car',
+      'Other Asset',
+    ],
   },
   other_liability: {
     key: 'other_liability',
@@ -620,6 +626,194 @@ export function computeAccountEquitySummary(account, holdingsForAccount) {
     cashBalance,
     computedBalance: Number((cashBalance + vestedValue).toFixed(2)),
     lastPriceAt,
+  };
+}
+
+// --- Real & International Assets (US House, Physical Gold, India Property, Vehicles) ---
+
+export const TROY_OZ_IN_GRAMS = 31.1034768;
+export const TOLA_IN_GRAMS = 11.6638038;
+
+export const GOLD_PURITY_OPTIONS = {
+  '24k': { key: '24k', label: '24K (99.9%)', short: '24K', factor: 1 },
+  '22k': { key: '22k', label: '22K (91.7%)', short: '22K', factor: 22 / 24 },
+  '18k': { key: '18k', label: '18K (75.0%)', short: '18K', factor: 18 / 24 },
+};
+
+export const GOLD_UNIT_OPTIONS = {
+  grams: { key: 'grams', label: 'Grams (g)', short: 'g', toGrams: 1 },
+  tolas: { key: 'tolas', label: 'Tolas (11.66g)', short: 'tolas', toGrams: TOLA_IN_GRAMS },
+  oz: { key: 'oz', label: 'Troy Oz (31.1g)', short: 'oz', toGrams: TROY_OZ_IN_GRAMS },
+};
+
+export const INR_UNIT_OPTIONS = {
+  crores: { key: 'crores', label: 'Crores (Cr)', short: 'Cr', multiplier: 10_000_000 },
+  lakhs: { key: 'lakhs', label: 'Lakhs (L)', short: 'L', multiplier: 100_000 },
+  inr: { key: 'inr', label: 'Rupees (₹)', short: '', multiplier: 1 },
+};
+
+export function subtypeToRealAssetType(subtype) {
+  if (subtype === 'US Home / Real Estate') return 'real_estate';
+  if (subtype === 'India Property / Land') return 'india_property';
+  if (subtype === 'Physical Gold / Jewelry') return 'gold';
+  if (subtype === 'Vehicle / Car') return 'vehicle';
+  return 'other';
+}
+
+export function getRealAssetType(account) {
+  if (!account || account.category !== 'other_asset') return null;
+  if (account.metadata?.real_asset_type) return account.metadata.real_asset_type;
+  return subtypeToRealAssetType(account.subtype);
+}
+
+export function computeGoldUsdValue(weight, unit = 'grams', purity = '22k', goldSpotUsdPerOz = 0) {
+  const w = Math.max(0, toNumber(weight));
+  const spot = Math.max(0, toNumber(goldSpotUsdPerOz));
+  const unitDef = GOLD_UNIT_OPTIONS[unit] || GOLD_UNIT_OPTIONS.grams;
+  const purityDef = GOLD_PURITY_OPTIONS[purity] || GOLD_PURITY_OPTIONS['22k'];
+
+  const grams = w * unitDef.toGrams;
+  const pureTroyOz = (grams / TROY_OZ_IN_GRAMS) * purityDef.factor;
+  const usdValue = Number((pureTroyOz * spot).toFixed(2));
+  const perGramUsd = spot > 0 ? (spot / TROY_OZ_IN_GRAMS) * purityDef.factor : 0;
+
+  return {
+    usdValue,
+    grams,
+    pureTroyOz,
+    perGramUsd,
+  };
+}
+
+export function computeInrToUsdValue(amount, unit = 'crores', usdInrRate = 85) {
+  const amt = Math.max(0, toNumber(amount));
+  const rate = toNumber(usdInrRate);
+  const unitDef = INR_UNIT_OPTIONS[unit] || INR_UNIT_OPTIONS.crores;
+  const totalInr = amt * unitDef.multiplier;
+  const usdValue = rate > 0 ? Number((totalInr / rate).toFixed(2)) : 0;
+
+  return {
+    usdValue,
+    totalInr,
+  };
+}
+
+export function formatInrDisplay(amount, unit = 'crores') {
+  const amt = toNumber(amount);
+  if (unit === 'crores') {
+    return `₹${amt.toLocaleString('en-IN', { maximumFractionDigits: 2 })} Cr`;
+  }
+  if (unit === 'lakhs') {
+    return `₹${amt.toLocaleString('en-IN', { maximumFractionDigits: 2 })} L`;
+  }
+  return `₹${Math.round(amt).toLocaleString('en-IN')}`;
+}
+
+export function computeRealAssetLiveBalance(account, quotesMap, nowIso = new Date().toISOString()) {
+  if (!account || account.is_archived || account.category !== 'other_asset') return null;
+  const meta = account.metadata || {};
+  const assetType = getRealAssetType(account);
+
+  if (assetType === 'gold') {
+    const q = quotesMap?.['GC=F'];
+    const spot = Number(q?.price);
+    const weight = toNumber(meta.gold_weight);
+    if (!Number.isFinite(spot) || spot <= 0 || weight <= 0) return null;
+
+    const { usdValue } = computeGoldUsdValue(
+      weight,
+      meta.gold_unit || 'grams',
+      meta.gold_purity || '22k',
+      spot
+    );
+    return {
+      nextBalance: usdValue,
+      nextMetadata: {
+        ...meta,
+        real_asset_type: 'gold',
+        last_gold_oz_price: Number(spot.toFixed(2)),
+        last_fx_at: q?.fetchedAt || nowIso,
+      },
+    };
+  }
+
+  if (assetType === 'india_property') {
+    const q = quotesMap?.['INR=X'];
+    const rate = Number(q?.price);
+    const inrAmount = toNumber(meta.inr_amount);
+    if (!Number.isFinite(rate) || rate <= 0 || inrAmount <= 0) return null;
+
+    const { usdValue } = computeInrToUsdValue(
+      inrAmount,
+      meta.inr_unit || 'crores',
+      rate
+    );
+    return {
+      nextBalance: usdValue,
+      nextMetadata: {
+        ...meta,
+        real_asset_type: 'india_property',
+        last_usd_inr_rate: Number(rate.toFixed(4)),
+        last_fx_at: q?.fetchedAt || nowIso,
+      },
+    };
+  }
+
+  return null;
+}
+
+export async function decodeVehicleVin(rawVin) {
+  const vin = String(rawVin || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+
+  if (vin.length !== 17) {
+    throw new Error('Please enter a standard 17-character VIN.');
+  }
+
+  const url = `https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues/${encodeURIComponent(vin)}?format=json`;
+  const resp = await fetch(url, { signal: AbortSignal.timeout(8000) });
+  if (!resp.ok) {
+    throw new Error(`NHTSA VIN lookup failed (HTTP ${resp.status}).`);
+  }
+
+  const json = await resp.json();
+  const row = json?.Results?.[0];
+  const year = String(row?.ModelYear || '').trim();
+  const make = String(row?.Make || '').trim();
+  const model = String(row?.Model || '').trim();
+  const trim = String(row?.Trim || '').trim();
+  const bodyClass = String(row?.BodyClass || '').trim();
+
+  if (!make && !model) {
+    throw new Error('Could not decode this VIN. Double-check all 17 characters or enter details manually.');
+  }
+
+  // Title-case ALL-CAPS makes from NHTSA (e.g., TOYOTA -> Toyota, keep BMW/GMC/MINI/RAM)
+  const formatMake = (m) => {
+    if (!m) return '';
+    if (m.length <= 3) return m.toUpperCase();
+    if (m === m.toUpperCase()) {
+      return m
+        .split(' ')
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join(' ');
+    }
+    return m;
+  };
+
+  const cleanMake = formatMake(make);
+  const displayName = [year, cleanMake, model, trim].filter(Boolean).join(' ');
+
+  return {
+    vin,
+    year,
+    make: cleanMake,
+    model,
+    trim,
+    bodyClass,
+    displayName,
   };
 }
 

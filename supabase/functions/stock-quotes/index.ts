@@ -6,7 +6,7 @@ const corsHeaders = {
   'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
 };
 
-const TICKER_REGEX = /^[A-Z0-9.\-^]{1,12}$/;
+const TICKER_REGEX = /^[A-Z0-9.\-^=]{1,14}$/;
 
 function toNyDate(unixSeconds?: number): string {
   if (!unixSeconds || !Number.isFinite(unixSeconds)) return '';
@@ -93,7 +93,7 @@ async function fetchYahooQuote(symbol: string) {
 }
 
 async function fetchStooqQuote(symbol: string) {
-  if (symbol.includes('^')) return null;
+  if (symbol.includes('^') || symbol.includes('=')) return null;
   try {
     const stooqSym = `${symbol.toLowerCase().replace('.', '-')}.us`;
     const url = `https://stooq.com/q/l/?s=${encodeURIComponent(stooqSym)}&f=sd2t2ohlcvn&h&e=csv`;
@@ -126,6 +126,31 @@ async function fetchStooqQuote(symbol: string) {
       name: String(cols[8] || symbol).replace(/^"|"$/g, ''),
       currency: 'USD',
       source: 'stooq',
+      fetchedAt: new Date().toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function fetchInrFallback() {
+  try {
+    const resp = await fetch('https://open.er-api.com/v6/latest/USD', {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!resp.ok) return null;
+    const json = await resp.json();
+    const rate = Number(json?.rates?.INR);
+    if (!Number.isFinite(rate) || rate <= 0) return null;
+    return {
+      symbol: 'INR=X',
+      price: Number(rate.toFixed(4)),
+      prevClose: Number(rate.toFixed(4)),
+      change: 0,
+      changePct: 0,
+      name: 'USD/INR',
+      currency: 'INR',
+      source: 'er-api',
       fetchedAt: new Date().toISOString(),
     };
   } catch {
@@ -173,6 +198,9 @@ Deno.serve(async (req: Request) => {
       symbols.map(async (sym) => {
         const yahoo = await fetchYahooQuote(sym);
         if (yahoo) return yahoo;
+        if (sym === 'INR=X') {
+          return await fetchInrFallback();
+        }
         const stooq = await fetchStooqQuote(sym);
         return stooq;
       })

@@ -21,20 +21,35 @@ import {
   TrendingUp,
   CalendarClock,
   CheckCircle2,
+  Home,
+  Car,
+  Gem,
+  Globe,
+  Search,
+  Link2,
 } from 'lucide-react';
 import {
   ACCOUNT_CATEGORIES,
   computeAccountEquitySummary,
+  computeGoldUsdValue,
+  computeInrToUsdValue,
   computeNetWorthSummary,
   computePromoStatus,
+  decodeVehicleVin,
   estimateLoanPayoff,
   formatCurrency,
+  formatInrDisplay,
   formatPercent,
   formatShortDate,
   getOwnerDisplayName,
+  getRealAssetType,
+  GOLD_PURITY_OPTIONS,
+  GOLD_UNIT_OPTIONS,
   HOLDING_TYPES,
+  INR_UNIT_OPTIONS,
   ordinalDay,
   OWNER_PROFILES,
+  subtypeToRealAssetType,
   todayIsoDate,
   toNumber,
 } from '../lib/finance';
@@ -44,6 +59,7 @@ const FILTER_TABS = [
   { key: 'retirement_401k', label: '401(k) & Retirement' },
   { key: 'bank', label: 'Banks & Cash' },
   { key: 'investment', label: 'Investments & RSUs' },
+  { key: 'other_asset', label: 'Property, Gold & Cars' },
   { key: 'credit_card', label: 'Credit Cards' },
   { key: 'loan', label: 'Active Loans' },
 ];
@@ -51,6 +67,7 @@ const FILTER_TABS = [
 export default function AccountsTab({
   supabase,
   accounts,
+  allAccounts,
   snapshots,
   equityHoldings,
   promos,
@@ -104,7 +121,28 @@ export default function AccountsTab({
     promo_apr: '0',
     standard_apr: '24.99',
     promo_expires_on: '',
+    // Real & International Assets metadata fields
+    property_location: '',
+    purchase_price: '',
+    linked_loan_id: '',
+    gold_weight: '',
+    gold_unit: 'grams',
+    gold_purity: '22k',
+    gold_spot_preview: '',
+    inr_amount: '',
+    inr_unit: 'crores',
+    usd_inr_preview: '',
+    vin: '',
+    vehicle_year: '',
+    vehicle_make: '',
+    vehicle_model: '',
+    vehicle_trim: '',
   });
+
+  // Live VIN decode & live Gold/FX rate helper states inside Account modal
+  const [decodingVin, setDecodingVin] = useState(false);
+  const [vinStatus, setVinStatus] = useState(null);
+  const [fetchingRate, setFetchingRate] = useState(false);
 
   // History Modal state
   const [historyAccount, setHistoryAccount] = useState(null);
@@ -206,6 +244,19 @@ export default function AccountsTab({
     return map;
   }, [promos]);
 
+  const allAccountMap = useMemo(
+    () => new Map((allAccounts || accounts || []).map((a) => [a.id, a])),
+    [allAccounts, accounts]
+  );
+
+  const availableLoans = useMemo(
+    () =>
+      (allAccounts || accounts || []).filter(
+        (a) => !a.is_archived && (a.category === 'loan' || a.category === 'other_liability')
+      ),
+    [allAccounts, accounts]
+  );
+
   const summary = useMemo(() => computeNetWorthSummary(accounts), [accounts]);
 
   const visibleAccounts = useMemo(() => {
@@ -213,7 +264,8 @@ export default function AccountsTab({
       .filter((a) => (showArchived ? true : !a.is_archived))
       .filter((a) => {
         if (filter === 'all') return true;
-        if (filter === 'investment') return a.category === 'investment' || a.category === 'other_asset';
+        if (filter === 'investment') return a.category === 'investment';
+        if (filter === 'other_asset') return a.category === 'other_asset';
         if (filter === 'loan') return a.category === 'loan' || a.category === 'other_liability';
         return a.category === filter;
       })
@@ -223,16 +275,92 @@ export default function AccountsTab({
       });
   }, [accounts, filter, showArchived]);
 
-  const openCreateModal = (defaultCat = 'retirement_401k') => {
+  const realAssetsBannerStats = useMemo(() => {
+    if (filter !== 'other_asset') return null;
+    const totalValue = visibleAccounts.reduce((s, a) => s + toNumber(a.current_balance), 0);
+    const seenLoans = new Set();
+    let totalLinkedDebt = 0;
+    for (const a of visibleAccounts) {
+      const lid = Number(a.metadata?.linked_loan_id);
+      if (lid && !seenLoans.has(lid)) {
+        const loan = allAccountMap.get(lid);
+        if (loan && !loan.is_archived) {
+          seenLoans.add(lid);
+          totalLinkedDebt += toNumber(loan.current_balance);
+        }
+      }
+    }
+    return {
+      totalValue,
+      totalLinkedDebt,
+      netEquity: totalValue - totalLinkedDebt,
+      linkedLoanCount: seenLoans.size,
+    };
+  }, [filter, visibleAccounts, allAccountMap]);
+
+  const fetchLiveMarketRateForForm = async (symbol) => {
+    setFetchingRate(true);
+    try {
+      const { data, error } = await supabase.functions.invoke('stock-quotes', {
+        body: { symbols: [symbol] },
+      });
+      if (error) throw error;
+      const price = Number(data?.quotes?.[symbol]?.price);
+      if (Number.isFinite(price) && price > 0) {
+        if (symbol === 'GC=F') {
+          setFormState((prev) => ({ ...prev, gold_spot_preview: String(price.toFixed(2)) }));
+        } else if (symbol === 'INR=X') {
+          setFormState((prev) => ({ ...prev, usd_inr_preview: String(price.toFixed(2)) }));
+        }
+        return price;
+      }
+    } catch {
+      // Ignore silent prefill error; user can retry or enter rate manually
+    } finally {
+      setFetchingRate(false);
+    }
+    return null;
+  };
+
+  const handleDecodeVinClick = async () => {
+    if (!formState.vin.trim()) return;
+    setDecodingVin(true);
+    setVinStatus(null);
+    try {
+      const decoded = await decodeVehicleVin(formState.vin);
+      setFormState((prev) => ({
+        ...prev,
+        vin: decoded.vin,
+        vehicle_year: decoded.year,
+        vehicle_make: decoded.make,
+        vehicle_model: decoded.model,
+        vehicle_trim: decoded.trim,
+        name: prev.name.trim() ? prev.name : decoded.displayName,
+        institution: prev.institution.trim() ? prev.institution : decoded.make,
+      }));
+      setVinStatus({ type: 'ok', text: `Decoded: ${decoded.displayName}` });
+    } catch (err) {
+      setVinStatus({ type: 'err', text: err?.message || 'VIN lookup failed.' });
+    } finally {
+      setDecodingVin(false);
+    }
+  };
+
+  const openCreateModal = (defaultCat = 'retirement_401k', defaultSubtype = null) => {
     const cat = ACCOUNT_CATEGORIES[defaultCat] ? defaultCat : 'retirement_401k';
+    const sub =
+      defaultSubtype && (ACCOUNT_CATEGORIES[cat].subtypes || []).includes(defaultSubtype)
+        ? defaultSubtype
+        : ACCOUNT_CATEGORIES[cat].subtypes[0] || '';
     setEditingAccount(null);
     setFormError('');
+    setVinStatus(null);
     setFormState({
       owner_profile: defaultOwnerForScope,
       name: '',
       institution: '',
       category: cat,
-      subtype: ACCOUNT_CATEGORIES[cat].subtypes[0] || '',
+      subtype: sub,
       current_balance: '',
       cash_balance: '0',
       credit_limit: '',
@@ -258,13 +386,36 @@ export default function AccountsTab({
       promo_apr: '0',
       standard_apr: '24.99',
       promo_expires_on: '',
+      property_location: '',
+      purchase_price: '',
+      linked_loan_id: '',
+      gold_weight: '',
+      gold_unit: 'grams',
+      gold_purity: '22k',
+      gold_spot_preview: '',
+      inr_amount: '',
+      inr_unit: 'crores',
+      usd_inr_preview: '',
+      vin: '',
+      vehicle_year: '',
+      vehicle_make: '',
+      vehicle_model: '',
+      vehicle_trim: '',
     });
     setFormModalOpen(true);
+
+    if (cat === 'other_asset') {
+      const rType = subtypeToRealAssetType(sub);
+      if (rType === 'gold') fetchLiveMarketRateForForm('GC=F');
+      if (rType === 'india_property') fetchLiveMarketRateForForm('INR=X');
+    }
   };
 
   const openEditModal = (acc) => {
+    const meta = acc.metadata || {};
     setEditingAccount(acc);
     setFormError('');
+    setVinStatus(null);
     setFormState({
       owner_profile: acc.owner_profile || 'primary',
       name: acc.name || '',
@@ -282,9 +433,9 @@ export default function AccountsTab({
       minimum_payment:
         acc.minimum_payment !== null && acc.minimum_payment !== undefined ? String(acc.minimum_payment) : '',
       due_day: acc.due_day ? String(acc.due_day) : '',
-      contribution_pct: acc.metadata?.contribution_pct !== undefined ? String(acc.metadata.contribution_pct) : '',
+      contribution_pct: meta.contribution_pct !== undefined && meta.contribution_pct !== null ? String(meta.contribution_pct) : '',
       employer_match_pct:
-        acc.metadata?.employer_match_pct !== undefined ? String(acc.metadata.employer_match_pct) : '',
+        meta.employer_match_pct !== undefined && meta.employer_match_pct !== null ? String(meta.employer_match_pct) : '',
       notes: acc.notes || '',
       add_initial_holding: false,
       initial_holdings: [{ symbol: '', holding_type: 'stock', shares: '', unvested_shares: '' }],
@@ -294,17 +445,60 @@ export default function AccountsTab({
       promo_apr: '0',
       standard_apr: '24.99',
       promo_expires_on: '',
+      property_location: meta.property_location || '',
+      purchase_price:
+        meta.purchase_price !== undefined && meta.purchase_price !== null ? String(meta.purchase_price) : '',
+      linked_loan_id: meta.linked_loan_id ? String(meta.linked_loan_id) : '',
+      gold_weight: meta.gold_weight !== undefined && meta.gold_weight !== null ? String(meta.gold_weight) : '',
+      gold_unit: meta.gold_unit || 'grams',
+      gold_purity: meta.gold_purity || '22k',
+      gold_spot_preview:
+        meta.last_gold_oz_price !== undefined && meta.last_gold_oz_price !== null
+          ? String(meta.last_gold_oz_price)
+          : '',
+      inr_amount: meta.inr_amount !== undefined && meta.inr_amount !== null ? String(meta.inr_amount) : '',
+      inr_unit: meta.inr_unit || 'crores',
+      usd_inr_preview:
+        meta.last_usd_inr_rate !== undefined && meta.last_usd_inr_rate !== null
+          ? String(meta.last_usd_inr_rate)
+          : '',
+      vin: meta.vin || '',
+      vehicle_year: meta.vehicle_year || '',
+      vehicle_make: meta.vehicle_make || '',
+      vehicle_model: meta.vehicle_model || '',
+      vehicle_trim: meta.vehicle_trim || '',
     });
     setFormModalOpen(true);
   };
 
   const handleCategoryChange = (newCat) => {
     const def = ACCOUNT_CATEGORIES[newCat];
+    const nextSubtype = def?.subtypes?.[0] || '';
+    setVinStatus(null);
     setFormState((prev) => ({
       ...prev,
       category: newCat,
-      subtype: def?.subtypes?.[0] || '',
+      subtype: nextSubtype,
     }));
+    if (newCat === 'other_asset') {
+      const rType = subtypeToRealAssetType(nextSubtype);
+      if (rType === 'gold') fetchLiveMarketRateForForm('GC=F');
+      if (rType === 'india_property') fetchLiveMarketRateForForm('INR=X');
+    }
+  };
+
+  const handleSubtypeChange = (nextSubtype) => {
+    setVinStatus(null);
+    setFormState((prev) => ({ ...prev, subtype: nextSubtype }));
+    if (formState.category === 'other_asset') {
+      const rType = subtypeToRealAssetType(nextSubtype);
+      if (rType === 'gold' && !formState.gold_spot_preview) {
+        fetchLiveMarketRateForForm('GC=F');
+      }
+      if (rType === 'india_property' && !formState.usd_inr_preview) {
+        fetchLiveMarketRateForForm('INR=X');
+      }
+    }
   };
 
   const recomputeAccountBalanceFromHoldings = async (accountId, overrideCashBalance) => {
@@ -375,6 +569,68 @@ export default function AccountsTab({
         metadata.contribution_pct = formState.contribution_pct !== '' ? Number(formState.contribution_pct) : null;
         metadata.employer_match_pct =
           formState.employer_match_pct !== '' ? Number(formState.employer_match_pct) : null;
+      }
+
+      if (formState.category === 'other_asset') {
+        const realAssetType = subtypeToRealAssetType(formState.subtype);
+        metadata.real_asset_type = realAssetType;
+
+        if (realAssetType === 'real_estate') {
+          metadata.property_location = formState.property_location.trim();
+          metadata.purchase_price =
+            formState.purchase_price !== '' ? Number(parseFloat(formState.purchase_price)) : null;
+          metadata.linked_loan_id = formState.linked_loan_id ? Number(formState.linked_loan_id) : null;
+        } else if (realAssetType === 'gold') {
+          const weightNum = Math.max(0, Number(parseFloat(formState.gold_weight || '0')) || 0);
+          let spotPrice = Number(parseFloat(formState.gold_spot_preview || '0')) || 0;
+          if (spotPrice <= 0) {
+            const { data: qData } = await supabase.functions.invoke('stock-quotes', {
+              body: { symbols: ['GC=F'] },
+            });
+            const fetched = Number(qData?.quotes?.['GC=F']?.price);
+            if (Number.isFinite(fetched) && fetched > 0) spotPrice = fetched;
+          }
+          metadata.gold_weight = weightNum;
+          metadata.gold_unit = formState.gold_unit || 'grams';
+          metadata.gold_purity = formState.gold_purity || '22k';
+          if (spotPrice > 0) {
+            metadata.last_gold_oz_price = Number(spotPrice.toFixed(2));
+            metadata.last_fx_at = new Date().toISOString();
+            const goldCalc = computeGoldUsdValue(
+              weightNum,
+              metadata.gold_unit,
+              metadata.gold_purity,
+              spotPrice
+            );
+            balanceVal = goldCalc.usdValue;
+          }
+        } else if (realAssetType === 'india_property') {
+          const inrAmt = Math.max(0, Number(parseFloat(formState.inr_amount || '0')) || 0);
+          let fxRate = Number(parseFloat(formState.usd_inr_preview || '0')) || 0;
+          if (fxRate <= 0) {
+            const { data: qData } = await supabase.functions.invoke('stock-quotes', {
+              body: { symbols: ['INR=X'] },
+            });
+            const fetched = Number(qData?.quotes?.['INR=X']?.price);
+            if (Number.isFinite(fetched) && fetched > 0) fxRate = fetched;
+          }
+          if (fxRate <= 0) fxRate = 85;
+          metadata.inr_amount = inrAmt;
+          metadata.inr_unit = formState.inr_unit || 'crores';
+          metadata.property_location = formState.property_location.trim();
+          metadata.linked_loan_id = formState.linked_loan_id ? Number(formState.linked_loan_id) : null;
+          metadata.last_usd_inr_rate = Number(fxRate.toFixed(4));
+          metadata.last_fx_at = new Date().toISOString();
+          const inrCalc = computeInrToUsdValue(inrAmt, metadata.inr_unit, fxRate);
+          balanceVal = inrCalc.usdValue;
+        } else if (realAssetType === 'vehicle') {
+          metadata.vin = formState.vin.trim().toUpperCase();
+          metadata.vehicle_year = formState.vehicle_year.trim();
+          metadata.vehicle_make = formState.vehicle_make.trim();
+          metadata.vehicle_model = formState.vehicle_model.trim();
+          metadata.vehicle_trim = formState.vehicle_trim.trim();
+          metadata.linked_loan_id = formState.linked_loan_id ? Number(formState.linked_loan_id) : null;
+        }
       }
 
       const payload = {
@@ -821,6 +1077,36 @@ export default function AccountsTab({
     await onDataChanged();
   };
 
+  const activeRealAssetType =
+    formState.category === 'other_asset' ? subtypeToRealAssetType(formState.subtype) : null;
+  const isLiveAutoPricedRealAsset =
+    activeRealAssetType === 'gold' || activeRealAssetType === 'india_property';
+
+  const goldPreviewCalc =
+    activeRealAssetType === 'gold' && toNumber(formState.gold_weight) > 0 && toNumber(formState.gold_spot_preview) > 0
+      ? computeGoldUsdValue(
+          formState.gold_weight,
+          formState.gold_unit,
+          formState.gold_purity,
+          formState.gold_spot_preview
+        )
+      : null;
+
+  const inrPreviewCalc =
+    activeRealAssetType === 'india_property' &&
+    toNumber(formState.inr_amount) > 0 &&
+    toNumber(formState.usd_inr_preview) > 0
+      ? computeInrToUsdValue(
+          formState.inr_amount,
+          formState.inr_unit,
+          formState.usd_inr_preview
+        )
+      : null;
+
+  const selectedLinkedLoan = formState.linked_loan_id
+    ? allAccountMap.get(Number(formState.linked_loan_id))
+    : null;
+
   return (
     <div className="space-y-6">
       {/* Top Action & Filter Header */}
@@ -883,6 +1169,82 @@ export default function AccountsTab({
             >
               {formatPercent(summary.creditUtilizationPct, 1)}
             </span>
+          </div>
+        </div>
+      )}
+
+      {filter === 'other_asset' && (
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-teal-500/25 bg-teal-500/5 px-5 py-3.5 text-xs">
+          <div className="flex flex-wrap items-center gap-4">
+            {realAssetsBannerStats && realAssetsBannerStats.totalValue > 0 ? (
+              <>
+                <div>
+                  <span className="text-zinc-400">Real Assets Value: </span>
+                  <span className="font-mono font-semibold text-teal-200">
+                    {mask(formatCurrency(realAssetsBannerStats.totalValue))}
+                  </span>
+                </div>
+                {realAssetsBannerStats.totalLinkedDebt > 0 && (
+                  <>
+                    <div>
+                      <span className="text-zinc-400">Linked Loans: </span>
+                      <span className="font-mono font-semibold text-rose-300">
+                        -{mask(formatCurrency(realAssetsBannerStats.totalLinkedDebt))}
+                      </span>
+                    </div>
+                    <div>
+                      <span className="text-zinc-400">Net Equity: </span>
+                      <span
+                        className={`font-mono font-semibold ${
+                          realAssetsBannerStats.netEquity >= 0 ? 'text-emerald-300' : 'text-rose-300'
+                        }`}
+                      >
+                        {mask(formatCurrency(realAssetsBannerStats.netEquity))}
+                      </span>
+                    </div>
+                  </>
+                )}
+              </>
+            ) : (
+              <span className="text-zinc-300">
+                Track US Real Estate, Physical Gold (auto-priced), India Properties (live INR→USD), and Vehicles by VIN.
+              </span>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => openCreateModal('other_asset', 'US Home / Real Estate')}
+              className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:border-teal-500/50 hover:text-teal-200"
+            >
+              <Home className="h-3 w-3 text-teal-400" />
+              + US Home
+            </button>
+            <button
+              type="button"
+              onClick={() => openCreateModal('other_asset', 'Physical Gold / Jewelry')}
+              className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:border-amber-500/50 hover:text-amber-200"
+            >
+              <Gem className="h-3 w-3 text-amber-400" />
+              + Gold
+            </button>
+            <button
+              type="button"
+              onClick={() => openCreateModal('other_asset', 'India Property / Land')}
+              className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:border-sky-500/50 hover:text-sky-200"
+            >
+              <Globe className="h-3 w-3 text-sky-400" />
+              + India Property
+            </button>
+            <button
+              type="button"
+              onClick={() => openCreateModal('other_asset', 'Vehicle / Car')}
+              className="inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1 text-[11px] font-medium text-zinc-200 hover:border-emerald-500/50 hover:text-emerald-200"
+            >
+              <Car className="h-3 w-3 text-emerald-400" />
+              + Car (VIN)
+            </button>
           </div>
         </div>
       )}
@@ -954,6 +1316,13 @@ export default function AccountsTab({
             const accPromos = (promosByAccount.get(acc.id) || []).filter(
               (p) => !p.is_paid_off && toNumber(p.promo_balance) > 0
             );
+            const realAssetType = getRealAssetType(acc);
+            const meta = acc.metadata || {};
+            const linkedLoan =
+              meta.linked_loan_id ? allAccountMap.get(Number(meta.linked_loan_id)) : null;
+            const linkedLoanBalance =
+              linkedLoan && !linkedLoan.is_archived ? toNumber(linkedLoan.current_balance) : 0;
+            const netAssetEquity = linkedLoan ? bal - linkedLoanBalance : null;
 
             return (
               <div
@@ -1010,6 +1379,149 @@ export default function AccountsTab({
 
                   {/* Category-specific insight pills & progress bars */}
                   <div className="mt-4 space-y-2.5">
+                    {/* Real & International Assets Rich Details */}
+                    {realAssetType === 'gold' && toNumber(meta.gold_weight) > 0 && (
+                      <div className="rounded-lg border border-amber-500/25 bg-amber-500/5 p-3 text-[11px]">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-amber-200">
+                          <span className="inline-flex items-center gap-1.5 font-medium">
+                            <Gem className="h-3.5 w-3.5 text-amber-400" />
+                            {toNumber(meta.gold_weight).toLocaleString('en-US', {
+                              maximumFractionDigits: 2,
+                            })}{' '}
+                            {GOLD_UNIT_OPTIONS[meta.gold_unit]?.short || 'g'} •{' '}
+                            {GOLD_PURITY_OPTIONS[meta.gold_purity]?.label || '22K'}
+                          </span>
+                          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-300">
+                            Live Gold (GC=F)
+                          </span>
+                        </div>
+                        {toNumber(meta.last_gold_oz_price) > 0 && (
+                          <div className="mt-1.5 flex flex-wrap items-center justify-between gap-2 text-zinc-400 tabular-nums">
+                            <span>
+                              Spot: {formatCurrency(meta.last_gold_oz_price, { decimals: 0 })}/oz
+                            </span>
+                            <span>
+                              ~
+                              {formatCurrency(
+                                computeGoldUsdValue(
+                                  1,
+                                  'grams',
+                                  meta.gold_purity || '22k',
+                                  meta.last_gold_oz_price
+                                ).perGramUsd
+                              )}
+                              /g ({GOLD_PURITY_OPTIONS[meta.gold_purity]?.short || '22K'})
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {realAssetType === 'india_property' && toNumber(meta.inr_amount) > 0 && (
+                      <div className="rounded-lg border border-sky-500/25 bg-sky-500/5 p-3 text-[11px]">
+                        <div className="flex flex-wrap items-center justify-between gap-2 text-sky-200">
+                          <span className="inline-flex items-center gap-1.5 font-semibold">
+                            <Globe className="h-3.5 w-3.5 text-sky-400" />
+                            {privacyMode
+                              ? '₹••••••'
+                              : formatInrDisplay(meta.inr_amount, meta.inr_unit || 'crores')}
+                            {meta.property_location ? ` • ${meta.property_location}` : ''}
+                          </span>
+                          <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-300">
+                            Live FX (INR=X)
+                          </span>
+                        </div>
+                        {toNumber(meta.last_usd_inr_rate) > 0 && (
+                          <div className="mt-1.5 flex items-center justify-between text-zinc-400 tabular-nums">
+                            <span>Converted @ ₹{toNumber(meta.last_usd_inr_rate).toFixed(2)} / $1</span>
+                            <span className="font-mono text-zinc-200">{mask(formatCurrency(bal))}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {realAssetType === 'vehicle' &&
+                      (meta.vin || meta.vehicle_make || meta.vehicle_model) && (
+                        <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-[11px]">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="inline-flex items-center gap-1.5 font-medium text-zinc-200">
+                              <Car className="h-3.5 w-3.5 text-teal-400" />
+                              {[
+                                meta.vehicle_year,
+                                meta.vehicle_make,
+                                meta.vehicle_model,
+                                meta.vehicle_trim,
+                              ]
+                                .filter(Boolean)
+                                .join(' ') || acc.name}
+                            </span>
+                            {meta.vin && (
+                              <span className="rounded bg-zinc-950 px-1.5 py-0.5 font-mono text-[10px] text-zinc-400">
+                                VIN {meta.vin}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                    {realAssetType === 'real_estate' &&
+                      (meta.property_location || toNumber(meta.purchase_price) > 0) && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 text-[11px] text-zinc-300">
+                          <span className="inline-flex items-center gap-1.5">
+                            <Home className="h-3.5 w-3.5 text-teal-400" />
+                            {meta.property_location || 'US Real Estate'}
+                          </span>
+                          {toNumber(meta.purchase_price) > 0 && (
+                            <span className="font-mono text-zinc-400 tabular-nums">
+                              Bought: {mask(formatCurrency(meta.purchase_price, { decimals: 0 }))}
+                              {bal > 0 && (
+                                <span
+                                  className={`ml-1.5 ${
+                                    bal - toNumber(meta.purchase_price) >= 0
+                                      ? 'text-emerald-400'
+                                      : 'text-rose-400'
+                                  }`}
+                                >
+                                  (
+                                  {mask(
+                                    formatCurrency(bal - toNumber(meta.purchase_price), {
+                                      showSign: true,
+                                      decimals: 0,
+                                    })
+                                  )}
+                                  )
+                                </span>
+                              )}
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                    {/* Linked Mortgage / Auto Loan Net Equity Box */}
+                    {linkedLoan && netAssetEquity !== null && (
+                      <div className="rounded-lg border border-teal-500/25 bg-teal-500/5 p-3 text-[11px]">
+                        <div className="flex items-center justify-between text-zinc-400">
+                          <span className="inline-flex items-center gap-1.5 text-teal-200">
+                            <Link2 className="h-3.5 w-3.5 text-teal-400" />
+                            Linked Loan: {linkedLoan.name}
+                          </span>
+                          <span className="font-mono text-rose-300 tabular-nums">
+                            -{mask(formatCurrency(linkedLoanBalance))}
+                          </span>
+                        </div>
+                        <div className="mt-1.5 flex items-center justify-between border-t border-teal-500/15 pt-1.5">
+                          <span className="font-medium text-zinc-200">Net Equity (Value − Loan)</span>
+                          <span
+                            className={`font-mono text-xs font-bold tabular-nums ${
+                              netAssetEquity >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                            }`}
+                          >
+                            {mask(formatCurrency(netAssetEquity))}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Live Stock / RSU Holdings Breakdown */}
                     {eqSummary.hasHoldings && (
                       <div className="space-y-1.5 rounded-lg border border-sky-500/20 bg-sky-500/5 p-3 text-[11px]">
@@ -1363,7 +1875,7 @@ export default function AccountsTab({
                   Account Subtype
                   <select
                     value={formState.subtype}
-                    onChange={(e) => setFormState({ ...formState, subtype: e.target.value })}
+                    onChange={(e) => handleSubtypeChange(e.target.value)}
                     className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
                   >
                     {(ACCOUNT_CATEGORIES[formState.category]?.subtypes || []).map((st) => (
@@ -1375,13 +1887,104 @@ export default function AccountsTab({
                 </label>
               </div>
 
+              {/* Vehicle VIN Auto-Decoder (placed above Nickname so VIN decode can auto-fill Nickname) */}
+              {activeRealAssetType === 'vehicle' && (
+                <div className="space-y-3 rounded-xl border border-teal-500/25 bg-teal-500/5 p-3.5">
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1.5 font-medium text-teal-200">
+                      <Car className="h-3.5 w-3.5 text-teal-400" />
+                      Vehicle VIN Auto-Lookup (US NHTSA)
+                    </span>
+                    <span className="text-[10px] text-zinc-400">Free • Instant decode</span>
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      maxLength={17}
+                      placeholder="17-digit VIN (e.g., 2T3P1RFV8PW123456)"
+                      value={formState.vin}
+                      onChange={(e) =>
+                        setFormState({ ...formState, vin: e.target.value.toUpperCase() })
+                      }
+                      className="flex-1 rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-100 focus:border-teal-500/60 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      disabled={decodingVin || formState.vin.trim().length < 11}
+                      onClick={handleDecodeVinClick}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-teal-500/40 bg-teal-500/15 px-3 py-2 text-xs font-semibold text-teal-200 hover:bg-teal-500/25 disabled:opacity-50"
+                    >
+                      <Search className="h-3.5 w-3.5" />
+                      {decodingVin ? 'Decoding…' : 'Decode VIN'}
+                    </button>
+                  </div>
+                  {vinStatus && (
+                    <div
+                      className={`text-[11px] ${
+                        vinStatus.type === 'ok' ? 'text-emerald-300' : 'text-rose-300'
+                      }`}
+                    >
+                      {vinStatus.text}
+                    </div>
+                  )}
+                  <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                    <input
+                      type="text"
+                      placeholder="Year"
+                      value={formState.vehicle_year}
+                      onChange={(e) => setFormState({ ...formState, vehicle_year: e.target.value })}
+                      className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Make"
+                      value={formState.vehicle_make}
+                      onChange={(e) => setFormState({ ...formState, vehicle_make: e.target.value })}
+                      className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Model"
+                      value={formState.vehicle_model}
+                      onChange={(e) => setFormState({ ...formState, vehicle_model: e.target.value })}
+                      className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Trim"
+                      value={formState.vehicle_trim}
+                      onChange={(e) => setFormState({ ...formState, vehicle_trim: e.target.value })}
+                      className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100"
+                    />
+                  </div>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <label className="block text-zinc-300">
-                  Account Nickname *
+                  {activeRealAssetType === 'real_estate'
+                    ? 'Property Name *'
+                    : activeRealAssetType === 'india_property'
+                    ? 'India Property Name *'
+                    : activeRealAssetType === 'gold'
+                    ? 'Gold Holding Name *'
+                    : activeRealAssetType === 'vehicle'
+                    ? 'Vehicle Nickname *'
+                    : 'Account Nickname *'}
                   <input
                     type="text"
                     required
-                    placeholder="e.g., E*TRADE RSU, Wife Fidelity 401(k)"
+                    placeholder={
+                      activeRealAssetType === 'real_estate'
+                        ? 'e.g., Primary Residence'
+                        : activeRealAssetType === 'india_property'
+                        ? 'e.g., Hyderabad Plot / Flat'
+                        : activeRealAssetType === 'gold'
+                        ? 'e.g., Family 22K Gold / Bars'
+                        : activeRealAssetType === 'vehicle'
+                        ? 'e.g., 2023 Toyota RAV4 Hybrid'
+                        : 'e.g., E*TRADE RSU, Wife Fidelity 401(k)'
+                    }
                     value={formState.name}
                     onChange={(e) => setFormState({ ...formState, name: e.target.value })}
                     className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
@@ -1389,65 +1992,314 @@ export default function AccountsTab({
                 </label>
 
                 <label className="block text-zinc-300">
-                  Institution / Issuer
+                  {activeRealAssetType === 'real_estate' || activeRealAssetType === 'india_property'
+                    ? 'Location / City'
+                    : activeRealAssetType === 'gold'
+                    ? 'Storage / Locker (optional)'
+                    : activeRealAssetType === 'vehicle'
+                    ? 'Make / Dealer (optional)'
+                    : 'Institution / Issuer'}
                   <input
                     type="text"
-                    placeholder="e.g., Fidelity, E*TRADE, Citi, Chase"
-                    value={formState.institution}
-                    onChange={(e) => setFormState({ ...formState, institution: e.target.value })}
+                    placeholder={
+                      activeRealAssetType === 'real_estate'
+                        ? 'e.g., Austin, TX'
+                        : activeRealAssetType === 'india_property'
+                        ? 'e.g., Hyderabad, Telangana'
+                        : activeRealAssetType === 'gold'
+                        ? 'e.g., Bank Locker / Home Safe'
+                        : activeRealAssetType === 'vehicle'
+                        ? 'e.g., Toyota, Tesla, Honda'
+                        : 'e.g., Fidelity, E*TRADE, Citi, Chase'
+                    }
+                    value={
+                      activeRealAssetType === 'real_estate' || activeRealAssetType === 'india_property'
+                        ? formState.property_location
+                        : formState.institution
+                    }
+                    onChange={(e) =>
+                      activeRealAssetType === 'real_estate' || activeRealAssetType === 'india_property'
+                        ? setFormState({ ...formState, property_location: e.target.value })
+                        : setFormState({ ...formState, institution: e.target.value })
+                    }
                     className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
                   />
                 </label>
               </div>
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                {editingAccount && (holdingsByAccount.get(editingAccount.id) || []).length > 0 ? (
-                  <label className="block text-zinc-300">
-                    Uninvested Cash Sweep ($)
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={formState.cash_balance}
-                      onChange={(e) => setFormState({ ...formState, cash_balance: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100"
-                    />
-                    <span className="mt-1 block text-[10px] text-sky-400">
-                      Total balance auto-calculates from cash + live Stocks/RSUs.
+              {/* Physical Gold Live Spot Pricing Panel */}
+              {activeRealAssetType === 'gold' && (
+                <div className="space-y-3 rounded-xl border border-amber-500/25 bg-amber-500/5 p-3.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 font-medium text-amber-200">
+                      <Gem className="h-3.5 w-3.5 text-amber-400" />
+                      Physical Gold (Auto-Priced via Live Gold Spot)
                     </span>
-                  </label>
-                ) : (
-                  <label className="block text-zinc-300">
-                    {ACCOUNT_CATEGORIES[formState.category]?.isLiability
-                      ? 'Current Balance Owed ($) *'
-                      : 'Current Balance / Cash ($) *'}
-                    <input
-                      type="number"
-                      step="0.01"
-                      required={!formState.add_initial_holding}
-                      placeholder="0.00"
-                      value={formState.current_balance}
-                      onChange={(e) => setFormState({ ...formState, current_balance: e.target.value })}
-                      className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
-                    />
-                  </label>
-                )}
+                    <button
+                      type="button"
+                      disabled={fetchingRate}
+                      onClick={() => fetchLiveMarketRateForForm('GC=F')}
+                      className="inline-flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-200 hover:bg-amber-500/25"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${fetchingRate ? 'animate-spin' : ''}`} />
+                      {fetchingRate ? 'Fetching…' : 'Live Spot'}
+                    </button>
+                  </div>
 
-                <label className="block text-zinc-300">
-                  {ACCOUNT_CATEGORIES[formState.category]?.isLiability
-                    ? 'Interest Rate (APR %)'
-                    : 'Yield / Expected Return (%)'}
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    max="100"
-                    placeholder="e.g., 4.25"
-                    value={formState.interest_rate}
-                    onChange={(e) => setFormState({ ...formState, interest_rate: e.target.value })}
-                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
-                  />
-                </label>
-              </div>
+                  <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                    <label className="block text-zinc-300">
+                      Total Weight *
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        required
+                        placeholder="e.g., 250"
+                        value={formState.gold_weight}
+                        onChange={(e) => setFormState({ ...formState, gold_weight: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100"
+                      />
+                    </label>
+                    <label className="block text-zinc-300">
+                      Weight Unit
+                      <select
+                        value={formState.gold_unit}
+                        onChange={(e) => setFormState({ ...formState, gold_unit: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-sm text-zinc-100"
+                      >
+                        {Object.values(GOLD_UNIT_OPTIONS).map((u) => (
+                          <option key={u.key} value={u.key}>
+                            {u.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="block text-zinc-300">
+                      Purity (Karat)
+                      <select
+                        value={formState.gold_purity}
+                        onChange={(e) => setFormState({ ...formState, gold_purity: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-sm text-zinc-100"
+                      >
+                        {Object.values(GOLD_PURITY_OPTIONS).map((p) => (
+                          <option key={p.key} value={p.key}>
+                            {p.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/20 bg-zinc-950/70 px-3 py-2 text-[11px]">
+                    <span className="text-zinc-400">
+                      {toNumber(formState.gold_spot_preview) > 0
+                        ? `Live Gold Spot: ${formatCurrency(formState.gold_spot_preview)}/oz`
+                        : 'Live Gold Spot (GC=F) will auto-fetch on save'}
+                    </span>
+                    {goldPreviewCalc && (
+                      <span className="font-mono font-semibold text-amber-300 tabular-nums">
+                        ≈ {formatCurrency(goldPreviewCalc.usdValue)} USD
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* India Property Live USD/INR FX Panel */}
+              {activeRealAssetType === 'india_property' && (
+                <div className="space-y-3 rounded-xl border border-sky-500/25 bg-sky-500/5 p-3.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 font-medium text-sky-200">
+                      <Globe className="h-3.5 w-3.5 text-sky-400" />
+                      India Property Valuation (Live INR → USD FX)
+                    </span>
+                    <button
+                      type="button"
+                      disabled={fetchingRate}
+                      onClick={() => fetchLiveMarketRateForForm('INR=X')}
+                      className="inline-flex items-center gap-1 rounded border border-sky-500/30 bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-200 hover:bg-sky-500/25"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${fetchingRate ? 'animate-spin' : ''}`} />
+                      {fetchingRate ? 'Fetching…' : 'Live USD/INR'}
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                    <label className="block text-zinc-300">
+                      Rough Valuation in INR *
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        required
+                        placeholder={
+                          formState.inr_unit === 'crores'
+                            ? 'e.g., 1.5'
+                            : formState.inr_unit === 'lakhs'
+                            ? 'e.g., 85'
+                            : 'e.g., 15000000'
+                        }
+                        value={formState.inr_amount}
+                        onChange={(e) => setFormState({ ...formState, inr_amount: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100"
+                      />
+                    </label>
+                    <label className="block text-zinc-300">
+                      INR Unit
+                      <select
+                        value={formState.inr_unit}
+                        onChange={(e) => setFormState({ ...formState, inr_unit: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100"
+                      >
+                        {Object.values(INR_UNIT_OPTIONS).map((u) => (
+                          <option key={u.key} value={u.key}>
+                            {u.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-sky-500/20 bg-zinc-950/70 px-3 py-2 text-[11px]">
+                    <span className="text-zinc-400">
+                      {toNumber(formState.usd_inr_preview) > 0
+                        ? `Live Rate: ₹${toNumber(formState.usd_inr_preview).toFixed(2)} = $1 USD`
+                        : 'Live USD/INR (INR=X) will auto-fetch on save'}
+                    </span>
+                    {inrPreviewCalc && (
+                      <span className="font-mono font-semibold text-sky-300 tabular-nums">
+                        {formatInrDisplay(formState.inr_amount, formState.inr_unit)} ≈{' '}
+                        {formatCurrency(inrPreviewCalc.usdValue)}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Standard Balance & Rate Row (Hidden for auto-priced Gold & India Property) */}
+              {!isLiveAutoPricedRealAsset && (
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  {editingAccount && (holdingsByAccount.get(editingAccount.id) || []).length > 0 ? (
+                    <label className="block text-zinc-300">
+                      Uninvested Cash Sweep ($)
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={formState.cash_balance}
+                        onChange={(e) => setFormState({ ...formState, cash_balance: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100"
+                      />
+                      <span className="mt-1 block text-[10px] text-sky-400">
+                        Total balance auto-calculates from cash + live Stocks/RSUs.
+                      </span>
+                    </label>
+                  ) : (
+                    <label className="block text-zinc-300">
+                      {ACCOUNT_CATEGORIES[formState.category]?.isLiability
+                        ? 'Current Balance Owed ($) *'
+                        : activeRealAssetType === 'real_estate' || activeRealAssetType === 'vehicle'
+                        ? 'Estimated Market Value ($) *'
+                        : 'Current Balance / Cash ($) *'}
+                      <input
+                        type="number"
+                        step="0.01"
+                        required={!formState.add_initial_holding}
+                        placeholder={
+                          activeRealAssetType === 'real_estate'
+                            ? 'e.g., 650000'
+                            : activeRealAssetType === 'vehicle'
+                            ? 'e.g., 28000'
+                            : '0.00'
+                        }
+                        value={formState.current_balance}
+                        onChange={(e) => setFormState({ ...formState, current_balance: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+                      />
+                    </label>
+                  )}
+
+                  {activeRealAssetType === 'real_estate' ? (
+                    <label className="block text-zinc-300">
+                      Original Purchase Price ($)
+                      <input
+                        type="number"
+                        step="1"
+                        min="0"
+                        placeholder="e.g., 540000 (optional)"
+                        value={formState.purchase_price}
+                        onChange={(e) => setFormState({ ...formState, purchase_price: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+                      />
+                    </label>
+                  ) : activeRealAssetType !== 'vehicle' ? (
+                    <label className="block text-zinc-300">
+                      {ACCOUNT_CATEGORIES[formState.category]?.isLiability
+                        ? 'Interest Rate (APR %)'
+                        : 'Yield / Expected Return (%)'}
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="100"
+                        placeholder="e.g., 4.25"
+                        value={formState.interest_rate}
+                        onChange={(e) => setFormState({ ...formState, interest_rate: e.target.value })}
+                        className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-sm text-zinc-100 focus:border-emerald-500/60 focus:outline-none"
+                      />
+                    </label>
+                  ) : (
+                    <div className="flex flex-col justify-end text-[11px] text-zinc-500">
+                      Enter a rough KBB / Carvana private-party estimate. You can link your Auto Loan below to see Net Car Equity.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Link to Mortgage / Auto Loan for US Home, India Property, and Vehicles */}
+              {(activeRealAssetType === 'real_estate' ||
+                activeRealAssetType === 'vehicle' ||
+                activeRealAssetType === 'india_property') && (
+                <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5">
+                  <label className="block text-zinc-300">
+                    <span className="inline-flex items-center gap-1.5 font-medium">
+                      <Link2 className="h-3.5 w-3.5 text-teal-400" />
+                      {activeRealAssetType === 'vehicle'
+                        ? 'Link to Auto Loan (for Net Car Equity)'
+                        : 'Link to Mortgage / Property Loan (for Net Equity)'}
+                    </span>
+                    <select
+                      value={formState.linked_loan_id}
+                      onChange={(e) => setFormState({ ...formState, linked_loan_id: e.target.value })}
+                      className="mt-1.5 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:border-teal-500/60 focus:outline-none"
+                    >
+                      <option value="">No loan linked (owned outright / add loan later)</option>
+                      {availableLoans.map((loan) => (
+                        <option key={loan.id} value={String(loan.id)}>
+                          {loan.name} — {formatCurrency(loan.current_balance)} remaining
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {selectedLinkedLoan && (
+                    <div className="mt-2 flex items-center justify-between text-[11px] text-zinc-400 tabular-nums">
+                      <span>Preview Net Equity (Value − Loan):</span>
+                      <span className="font-mono font-semibold text-emerald-300">
+                        {formatCurrency(
+                          (activeRealAssetType === 'india_property'
+                            ? inrPreviewCalc?.usdValue || 0
+                            : toNumber(formState.current_balance)) -
+                            toNumber(selectedLinkedLoan.current_balance)
+                        )}
+                      </span>
+                    </div>
+                  )}
+                  {availableLoans.length === 0 && (
+                    <p className="mt-1.5 text-[10px] text-zinc-500">
+                      Tip: Add your Mortgage or Auto Loan under Active Loans first (or afterwards and come back to Edit to link it).
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Multi-Stock / RSU Setup when creating an Investment / 401k account */}
               {!editingAccount &&
@@ -1881,6 +2733,9 @@ export default function AccountsTab({
                     const ownerKey = acc.owner_profile || 'primary';
                     const ownerBadge = OWNER_PROFILES[ownerKey] || OWNER_PROFILES.primary;
                     const hasHoldings = (holdingsByAccount.get(acc.id) || []).length > 0;
+                    const isAutoLiveRealAsset = ['gold', 'india_property'].includes(
+                      getRealAssetType(acc)
+                    );
 
                     return (
                       <div key={acc.id} className="flex flex-wrap items-center justify-between gap-3 py-3 text-xs">
@@ -1890,7 +2745,7 @@ export default function AccountsTab({
                             <span className={`rounded border px-1.5 py-0.5 text-[10px] ${ownerBadge.badgeClass}`}>
                               {getOwnerDisplayName(ownerKey, householdNames)}
                             </span>
-                            {hasHoldings && (
+                            {(hasHoldings || isAutoLiveRealAsset) && (
                               <span className="rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
                                 Auto-priced
                               </span>

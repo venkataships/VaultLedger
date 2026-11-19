@@ -18,7 +18,9 @@ import {
 import { supabase } from './lib/supabase';
 import { seedDemoVaultData } from './lib/demoSeed';
 import {
+  computeRealAssetLiveBalance,
   filterByHouseholdScope,
+  getRealAssetType,
   todayIsoDate,
   toNumber,
 } from './lib/finance';
@@ -177,21 +179,24 @@ function AuthenticatedVault({
 
   const refreshStockPrices = useCallback(
     async (accountsList, holdingsList) => {
-      const activeAccountIds = new Set(
-        (accountsList || []).filter((a) => !a.is_archived).map((a) => a.id)
-      );
+      const activeAccounts = (accountsList || []).filter((a) => !a.is_archived);
+      const activeAccountIds = new Set(activeAccounts.map((a) => a.id));
       const activeHoldings = (holdingsList || []).filter((h) =>
         activeAccountIds.has(h.account_id)
       );
 
-      const uniqueSymbols = Array.from(
-        new Set(
-          activeHoldings
-            .map((h) => (h.symbol || '').trim().toUpperCase())
-            .filter(Boolean)
-        )
+      const symbolSet = new Set(
+        activeHoldings
+          .map((h) => (h.symbol || '').trim().toUpperCase())
+          .filter(Boolean)
       );
 
+      const hasGoldAsset = activeAccounts.some((a) => getRealAssetType(a) === 'gold');
+      const hasIndiaAsset = activeAccounts.some((a) => getRealAssetType(a) === 'india_property');
+      if (hasGoldAsset) symbolSet.add('GC=F');
+      if (hasIndiaAsset) symbolSet.add('INR=X');
+
+      const uniqueSymbols = Array.from(symbolSet);
       if (uniqueSymbols.length === 0) return null;
 
       setQuotesRefreshing(true);
@@ -238,7 +243,9 @@ function AuthenticatedVault({
           );
         }
 
-        // Recalculate account balances = cash_balance + sum(vested_shares * live_price)
+        // Recalculate account balances for:
+        // 1) Equity/RSU accounts = cash_balance + sum(vested_shares * live_price)
+        // 2) Live-priced Real Assets (Physical Gold via GC=F, India Property via INR=X)
         const holdingsByAccount = new Map();
         for (const h of updatedHoldings) {
           if (!holdingsByAccount.has(h.account_id)) holdingsByAccount.set(h.account_id, []);
@@ -247,32 +254,55 @@ function AuthenticatedVault({
 
         const snapshotUpserts = [];
         const updatedAccounts = (accountsList || []).map((acc) => {
+          if (acc.is_archived) return acc;
+
           const accHoldings = holdingsByAccount.get(acc.id);
-          if (!accHoldings || accHoldings.length === 0 || acc.is_archived) return acc;
+          if (accHoldings && accHoldings.length > 0) {
+            const equityTotal = accHoldings.reduce(
+              (sum, h) => sum + toNumber(h.shares) * toNumber(h.last_price),
+              0
+            );
+            const nextBalance = Number((toNumber(acc.cash_balance) + equityTotal).toFixed(2));
+            snapshotUpserts.push({
+              account_id: acc.id,
+              snapshot_date: today,
+              balance: nextBalance,
+              note: 'Auto stock/RSU refresh',
+            });
 
-          const equityTotal = accHoldings.reduce(
-            (sum, h) => sum + toNumber(h.shares) * toNumber(h.last_price),
-            0
-          );
-          const nextBalance = Number((toNumber(acc.cash_balance) + equityTotal).toFixed(2));
-          snapshotUpserts.push({
-            account_id: acc.id,
-            snapshot_date: today,
-            balance: nextBalance,
-            note: 'Auto stock/RSU refresh',
-          });
+            if (Math.abs(nextBalance - toNumber(acc.current_balance)) >= 0.01) {
+              return {
+                ...acc,
+                current_balance: nextBalance,
+                last_updated_at: nowIso,
+              };
+            }
+            return acc;
+          }
 
-          if (Math.abs(nextBalance - toNumber(acc.current_balance)) >= 0.01) {
+          const realAssetCalc = computeRealAssetLiveBalance(acc, quotes, nowIso);
+          if (realAssetCalc) {
+            snapshotUpserts.push({
+              account_id: acc.id,
+              snapshot_date: today,
+              balance: realAssetCalc.nextBalance,
+              note:
+                getRealAssetType(acc) === 'gold'
+                  ? 'Auto live Gold spot refresh'
+                  : 'Auto live USD/INR FX refresh',
+            });
             return {
               ...acc,
-              current_balance: nextBalance,
+              current_balance: realAssetCalc.nextBalance,
+              metadata: realAssetCalc.nextMetadata,
               last_updated_at: nowIso,
             };
           }
+
           return acc;
         });
 
-        // Persist recalculated account balances
+        // Persist recalculated account balances & FX/Gold metadata
         const changedAccounts = updatedAccounts.filter(
           (acc, idx) => acc !== accountsList[idx]
         );
@@ -283,6 +313,7 @@ function AuthenticatedVault({
                 .from('accounts')
                 .update({
                   current_balance: acc.current_balance,
+                  metadata: acc.metadata || {},
                   last_updated_at: acc.last_updated_at,
                 })
                 .eq('id', acc.id)
@@ -376,13 +407,19 @@ function AuthenticatedVault({
           });
         }
 
+        const hasLiveMarketItems =
+          loadedHoldings.length > 0 ||
+          loadedAccounts.some(
+            (a) => !a.is_archived && ['gold', 'india_property'].includes(getRealAssetType(a))
+          );
+
         const shouldAutoRefresh =
-          loadedHoldings.length > 0 &&
+          hasLiveMarketItems &&
           (refreshQuotes || !autoRefreshedOnOpenRef.current);
 
         if (shouldAutoRefresh) {
           autoRefreshedOnOpenRef.current = true;
-          // Refresh live prices immediately on webpage open without blocking initial paint
+          // Refresh live stock, gold & FX prices immediately on webpage open without blocking initial paint
           refreshStockPrices(loadedAccounts, loadedHoldings);
         }
       } catch (err) {
@@ -432,6 +469,15 @@ function AuthenticatedVault({
   const scopedPromos = useMemo(
     () => creditCardPromos.filter((p) => scopedAccountIds.has(p.account_id)),
     [creditCardPromos, scopedAccountIds]
+  );
+
+  const hasLiveQuotesSources = useMemo(
+    () =>
+      equityHoldings.length > 0 ||
+      accounts.some(
+        (a) => !a.is_archived && ['gold', 'india_property'].includes(getRealAssetType(a))
+      ),
+    [equityHoldings, accounts]
   );
 
   const hasJointItems = useMemo(
@@ -614,8 +660,8 @@ function AuthenticatedVault({
               </div>
             )}
 
-            {/* Live Stock/RSU Quotes Button */}
-            {equityHoldings.length > 0 && (
+            {/* Live Stock / Gold / FX Quotes Button */}
+            {hasLiveQuotesSources && (
               <button
                 type="button"
                 disabled={quotesRefreshing}
@@ -623,8 +669,8 @@ function AuthenticatedVault({
                 title={
                   quoteStatusError ||
                   (lastQuotesSyncAt
-                    ? `Last live market sync: ${new Date(lastQuotesSyncAt).toLocaleTimeString()}`
-                    : 'Refresh live stock & RSU prices')
+                    ? `Last live market/FX sync: ${new Date(lastQuotesSyncAt).toLocaleTimeString()}`
+                    : 'Refresh live stock, gold & USD/INR prices')
                 }
                 className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium transition ${
                   quoteStatusError
@@ -752,6 +798,7 @@ function AuthenticatedVault({
               <AccountsTab
                 supabase={supabase}
                 accounts={scopedAccounts}
+                allAccounts={accounts}
                 snapshots={scopedSnapshots}
                 equityHoldings={scopedHoldings}
                 promos={scopedPromos}

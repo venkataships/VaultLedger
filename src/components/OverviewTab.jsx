@@ -25,6 +25,7 @@ import {
   Users,
   CalendarClock,
   Activity,
+  Home,
 } from 'lucide-react';
 import {
   buildNetWorthTimeSeries,
@@ -38,6 +39,7 @@ import {
   formatPercent,
   formatShortDate,
   getOwnerDisplayName,
+  getRealAssetType,
   ordinalDay,
   OWNER_PROFILES,
   toNumber,
@@ -570,9 +572,14 @@ export default function OverviewTab({
               <div className="mt-2 font-mono text-2xl font-bold tracking-tight text-emerald-400 tabular-nums">
                 {mask(formatCurrency(summary.totalAssets))}
               </div>
-              <div className="mt-2.5 flex items-center justify-between text-[11px] text-zinc-400 tabular-nums">
+              <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 text-[11px] text-zinc-400 tabular-nums">
                 <span>401(k): {mask(formatCurrency(summary.retirement401k, { compact: true }))}</span>
-                <span>Inv/RSU: {mask(formatCurrency(summary.investments, { compact: true }))}</span>
+                <span>Inv: {mask(formatCurrency(summary.investments, { compact: true }))}</span>
+                {summary.otherAssets > 0 && (
+                  <span className="text-teal-300">
+                    Real: {mask(formatCurrency(summary.otherAssets, { compact: true }))}
+                  </span>
+                )}
               </div>
             </div>
 
@@ -878,8 +885,8 @@ export default function OverviewTab({
             </div>
           </div>
 
-          {/* 5 Core Balance Pillars */}
-          <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-5">
+          {/* 6 Core Balance Pillars */}
+          <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
             <button
               type="button"
               onClick={() => onNavigateTab('accounts', 'retirement_401k')}
@@ -937,10 +944,32 @@ export default function OverviewTab({
               </div>
               <div className="mt-3 text-xs font-medium text-zinc-400">Stocks, RSUs & Inv.</div>
               <div className="mt-1 font-mono text-lg font-semibold text-zinc-100 tabular-nums">
-                {mask(formatCurrency(summary.investments + summary.otherAssets))}
+                {mask(formatCurrency(summary.investments))}
               </div>
               <div className="mt-1 text-[11px] text-zinc-500">
                 {equityStats ? 'Auto-synced with live prices' : 'Brokerage, RSUs & equity'}
+              </div>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onNavigateTab('accounts', 'other_asset')}
+              className="group rounded-xl border border-zinc-800/90 bg-zinc-950/70 p-4 text-left transition hover:border-teal-500/40"
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-500/10 text-teal-400">
+                  <Home className="h-4 w-4" />
+                </div>
+                <ArrowUpRight className="h-3.5 w-3.5 text-zinc-600 transition group-hover:text-teal-400" />
+              </div>
+              <div className="mt-3 text-xs font-medium text-zinc-400">Property, Gold & Cars</div>
+              <div className="mt-1 font-mono text-lg font-semibold text-zinc-100 tabular-nums">
+                {mask(formatCurrency(summary.otherAssets))}
+              </div>
+              <div className="mt-1 text-[11px] text-zinc-500">
+                {(accounts || []).some((a) => !a.is_archived && ['gold', 'india_property'].includes(getRealAssetType(a)))
+                  ? 'Live Gold & INR FX synced'
+                  : 'House, Gold, India & Cars'}
               </div>
             </button>
 
