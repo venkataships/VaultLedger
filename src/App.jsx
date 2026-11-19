@@ -14,6 +14,7 @@ import {
   Pencil,
   X,
   Check,
+  Sparkles,
 } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import { seedDemoVaultData } from './lib/demoSeed';
@@ -35,6 +36,7 @@ import VaultLockScreen from './components/VaultLockScreen';
 import OverviewTab from './components/OverviewTab';
 import AccountsTab from './components/AccountsTab';
 import ExpensesTab from './components/ExpensesTab';
+import AdvisorTab from './components/AdvisorTab';
 import SecurityTab from './components/SecurityTab';
 
 function AuthenticatedVault({
@@ -166,6 +168,7 @@ function AuthenticatedVault({
   const [budgets, setBudgets] = useState([]);
   const [equityHoldings, setEquityHoldings] = useState([]);
   const [creditCardPromos, setCreditCardPromos] = useState([]);
+  const [taxProfile, setTaxProfile] = useState(null);
 
   const [loadingData, setLoadingData] = useState(true);
   const [loadError, setLoadError] = useState('');
@@ -361,7 +364,7 @@ function AuthenticatedVault({
     async ({ refreshQuotes = false } = {}) => {
       setLoadError('');
       try {
-        const [accRes, snapRes, expRes, billRes, budRes, settingsRes, holdRes, promoRes] =
+        const [accRes, snapRes, expRes, billRes, budRes, settingsRes, holdRes, promoRes, taxRes] =
           await Promise.all([
             supabase.from('accounts').select('*').order('id', { ascending: true }),
             supabase
@@ -378,6 +381,7 @@ function AuthenticatedVault({
             supabase.from('household_settings').select('*').maybeSingle(),
             supabase.from('equity_holdings').select('*').order('id', { ascending: true }),
             supabase.from('credit_card_promos').select('*').order('expires_on', { ascending: true }),
+            supabase.from('tax_comp_profiles').select('*').maybeSingle(),
           ]);
 
         if (accRes.error) throw accRes.error;
@@ -388,6 +392,7 @@ function AuthenticatedVault({
         if (settingsRes.error) throw settingsRes.error;
         if (holdRes.error) throw holdRes.error;
         if (promoRes.error) throw promoRes.error;
+        if (taxRes.error) throw taxRes.error;
 
         const loadedAccounts = accRes.data || [];
         const loadedHoldings = holdRes.data || [];
@@ -399,6 +404,7 @@ function AuthenticatedVault({
         setBudgets(budRes.data || []);
         setEquityHoldings(loadedHoldings);
         setCreditCardPromos(promoRes.data || []);
+        setTaxProfile(taxRes.data || null);
 
         if (settingsRes.data) {
           setHouseholdNames({
@@ -542,6 +548,7 @@ function AuthenticatedVault({
     { key: 'overview', label: 'Overview', icon: LayoutDashboard },
     { key: 'accounts', label: 'Accounts & Debt', icon: Wallet },
     { key: 'expenses', label: 'Monthly Expenses', icon: Receipt },
+    { key: 'advisor', label: 'AI Advisor', icon: Sparkles },
     { key: 'security', label: 'Security & 2FA', icon: Lock },
   ];
 
@@ -826,6 +833,20 @@ function AuthenticatedVault({
                 householdNames={householdNames}
                 privacyMode={privacyMode}
                 onDataChanged={() => loadAllData()}
+              />
+            )}
+
+            {activeTab === 'advisor' && (
+              <AdvisorTab
+                supabase={supabase}
+                session={session}
+                accounts={accounts}
+                equityHoldings={equityHoldings}
+                taxProfile={taxProfile}
+                householdScope={householdScope}
+                householdNames={householdNames}
+                privacyMode={privacyMode}
+                onTaxProfileSaved={() => loadAllData()}
               />
             )}
 
