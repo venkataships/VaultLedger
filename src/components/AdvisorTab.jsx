@@ -23,20 +23,26 @@ const MODELS = [
   {
     id: 'gemini-4-neon',
     label: 'Gemini 4 Neon',
-    badge: 'Latest Flagship',
-    desc: 'Newest Gemini 4 reasoning model for tax strategy, RSU math & portfolio risk',
+    badge: 'Flagship • Paid',
+    desc: 'Newest Gemini 4 reasoning model (requires Paid Tier billing; auto-falls back to Hydrogen on Free Tier)',
   },
   {
     id: 'gemini-4-argon',
     label: 'Gemini 4 Argon',
-    badge: 'Balanced CFO',
-    desc: 'Efficient frontier reasoning for interactive tax & wealth planning',
+    badge: 'Balanced • Paid',
+    desc: 'Efficient frontier reasoning (requires Paid Tier billing)',
   },
   {
     id: 'gemini-4-hydrogen',
     label: 'Gemini 4 Hydrogen',
-    badge: 'Fast',
-    desc: 'Snappy answers for quick balance & spending questions',
+    badge: 'Free Tier',
+    desc: 'Fast Gemini 4 model — works on Free Tier & Paid Tier',
+  },
+  {
+    id: 'gemini-3.5-flash-lite',
+    label: '3.5 Flash-Lite',
+    badge: 'Lite • Free',
+    desc: 'Ultra-fast lightweight model on Free Tier',
   },
 ];
 
@@ -475,7 +481,18 @@ export default function AdvisorTab({
           messages: nextHistory,
         },
       });
-      if (error) throw error;
+      if (error) {
+        let detailedMsg = error.message;
+        try {
+          if (error.context && typeof error.context.json === 'function') {
+            const errJson = await error.context.json();
+            if (errJson?.error) detailedMsg = errJson.error;
+          }
+        } catch {
+          // Keep default error.message
+        }
+        throw new Error(detailedMsg);
+      }
 
       if (data?.configured === false) {
         setAdvisorStatus({ checking: false, configured: false, error: '' });
@@ -483,8 +500,8 @@ export default function AdvisorTab({
         return;
       }
 
-      if (data?.error) {
-        throw new Error(data.error);
+      if (data?.ok === false || data?.error) {
+        throw new Error(data.error || 'Gemini Advisor returned an error.');
       }
 
       setMessages((prev) => [
@@ -493,6 +510,7 @@ export default function AdvisorTab({
           role: 'assistant',
           text: data?.reply || 'No response returned.',
           model: data?.model || selectedModel,
+          fallbackNote: data?.fallbackNote || '',
           usage: data?.usage || null,
         },
       ]);
@@ -1077,13 +1095,20 @@ export default function AdvisorTab({
                   }`}
                 >
                   {m.role === 'assistant' && (
-                    <div className="mb-2 flex items-center justify-between gap-4 border-b border-zinc-800/80 pb-1.5 text-[10px] text-zinc-500">
-                      <span className="inline-flex items-center gap-1 font-medium text-emerald-300">
-                        <Sparkles className="h-3 w-3" />
-                        {MODELS.find((x) => x.id === m.model)?.label || m.model || 'Gemini 4'}
-                      </span>
-                      {m.usage?.total_tokens && (
-                        <span className="font-mono">{m.usage.total_tokens.toLocaleString()} tokens</span>
+                    <div className="mb-2 space-y-1.5 border-b border-zinc-800/80 pb-1.5 text-[10px] text-zinc-500">
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="inline-flex items-center gap-1 font-medium text-emerald-300">
+                          <Sparkles className="h-3 w-3" />
+                          {MODELS.find((x) => x.id === m.model)?.label || m.model || 'Gemini 4'}
+                        </span>
+                        {m.usage?.total_tokens && (
+                          <span className="font-mono">{m.usage.total_tokens.toLocaleString()} tokens</span>
+                        )}
+                      </div>
+                      {m.fallbackNote && (
+                        <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-200">
+                          {m.fallbackNote}
+                        </div>
                       )}
                     </div>
                   )}

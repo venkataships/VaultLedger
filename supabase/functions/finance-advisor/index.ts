@@ -12,20 +12,26 @@ const ALLOWED_MODELS = [
   {
     id: 'gemini-4-neon',
     label: 'Gemini 4 Neon',
-    badge: 'Latest Flagship',
-    description: 'Newest Gemini 4 reasoning model for tax optimization, RSU math, debt & options strategy',
+    badge: 'Flagship • Paid Tier',
+    description: 'Newest Gemini 4 reasoning model (requires Paid Tier billing in Google AI Studio)',
   },
   {
     id: 'gemini-4-argon',
     label: 'Gemini 4 Argon',
-    badge: 'Balanced CFO',
-    description: 'Efficient frontier reasoning for interactive financial & tax planning',
+    badge: 'Balanced • Paid Tier',
+    description: 'Efficient frontier reasoning (requires Paid Tier billing in Google AI Studio)',
   },
   {
     id: 'gemini-4-hydrogen',
     label: 'Gemini 4 Hydrogen',
-    badge: 'Fast',
-    description: 'Fast interactive Q&A on balances, spending & quick calculations',
+    badge: 'Free Tier',
+    description: 'Gemini 4 workhorse model — works on both Free Tier and Paid Tier',
+  },
+  {
+    id: 'gemini-3.5-flash-lite',
+    label: 'Gemini 3.5 Flash-Lite',
+    badge: 'Ultra-Fast • Free',
+    description: 'Fastest lightweight model for quick balance & spending Q&A',
   },
 ] as const;
 
@@ -476,12 +482,70 @@ Deno.serve(async (req: Request) => {
     }));
 
     const ai = new GoogleGenAI({ apiKey });
-    const interaction = await ai.interactions.create({
-      model,
-      store: false,
-      system_instruction: systemInstruction,
-      input: steps,
-    });
+
+    const callModel = async (targetModel: string) => {
+      return await ai.interactions.create(
+        {
+          model: targetModel,
+          store: false,
+          system_instruction: systemInstruction,
+          input: steps,
+        },
+        { maxRetries: 0, timeout: 45000 }
+      );
+    };
+
+    let interaction;
+    let usedModel = model;
+    let fallbackNote = '';
+
+    try {
+      interaction = await callModel(model);
+    } catch (primaryErr) {
+      const primaryMsg = primaryErr instanceof Error ? primaryErr.message : String(primaryErr);
+      console.error(`[finance-advisor] Primary model ${model} failed:`, primaryMsg);
+
+      const isQuotaOrAccess =
+        /429|RESOURCE_EXHAUSTED|quota|limit:\s*0|billing|not found|404|permission|403|overloaded|503/i.test(
+          primaryMsg
+        );
+
+      // If a Paid-Tier model (Neon/Argon) hits Free-Tier quota/access limit, fall back cleanly to Free-Tier Gemini 4 Hydrogen
+      const fallbackChain = ['gemini-4-hydrogen', 'gemini-3.5-flash-lite'].filter(
+        (m) => m !== model
+      );
+
+      if (isQuotaOrAccess && fallbackChain.length > 0) {
+        let lastFallbackErr = primaryMsg;
+        for (const fbModel of fallbackChain) {
+          try {
+            interaction = await callModel(fbModel);
+            usedModel = fbModel;
+            fallbackNote =
+              `${model} returned a quota/tier error on your Google AI Studio key (paid-tier models require billing enabled). ` +
+              `Answered automatically using ${fbModel}.`;
+            break;
+          } catch (fbErr) {
+            lastFallbackErr = fbErr instanceof Error ? fbErr.message : String(fbErr);
+            console.error(`[finance-advisor] Fallback model ${fbModel} failed:`, lastFallbackErr);
+          }
+        }
+
+        if (!interaction) {
+          return jsonResp({
+            configured: true,
+            ok: false,
+            error: `Gemini API error (${model}): ${primaryMsg}`,
+          });
+        }
+      } else {
+        return jsonResp({
+          configured: true,
+          ok: false,
+          error: `Gemini API error (${model}): ${primaryMsg}`,
+        });
+      }
+    }
 
     const reply =
       interaction.output_text ||
@@ -489,13 +553,17 @@ Deno.serve(async (req: Request) => {
 
     return jsonResp({
       configured: true,
+      ok: true,
       reply,
-      model,
+      model: usedModel,
+      requestedModel: model,
+      fallbackNote: fallbackNote || undefined,
       usage: interaction.usage || null,
       contextStats: stats,
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Advisor request failed';
-    return jsonResp({ error: message }, 500);
+    console.error('[finance-advisor] Unhandled error:', message);
+    return jsonResp({ configured: true, ok: false, error: message }, 200);
   }
 });
