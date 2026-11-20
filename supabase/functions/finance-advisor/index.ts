@@ -203,6 +203,18 @@ const IRS_2026 = {
   depCareFsaMfj: 7500,
   depCareFsaMfs: 3750,
   esppFmvCap: 25000,
+  saltBaseCap: 40400,
+  saltBaseCapMfs: 20200,
+  saltFloor: 10000,
+  saltFloorMfs: 5000,
+  saltPhaseoutThreshold: 505000,
+  saltPhaseoutThresholdMfs: 252500,
+  saltPhaseoutRate: 0.3,
+  capLossOrdinaryLimit: 3000,
+  capLossOrdinaryLimitMfs: 1500,
+  ctcPerChild: 2200,
+  ctcPhaseoutMfj: 400000,
+  ctcPhaseoutOther: 200000,
   standardDeduction: {
     married_filing_jointly: 32200,
     married_filing_separately: 16100,
@@ -356,6 +368,7 @@ function buildPersonPaystubSnapshot(
   const annualPreTaxTotal = preTaxPerCheck * periods;
   const annualTaxesFromBase = taxesPerCheck * periods;
   const annualFedFromBase = fedTax * periods;
+  const annualStateFromBase = stateTax * periods;
   const annualPostTaxTotal = postTaxPerCheck * periods;
   const annualNetBase = netPerCheck * periods;
   const avgMonthlyNetBase = annualNetBase / 12;
@@ -390,6 +403,7 @@ function buildPersonPaystubSnapshot(
       annualDepCareFsa,
       annualPreTaxTotal,
       annualFedFromBase,
+      annualStateFromBase,
       annualTaxesFromBase,
       annualPostTaxTotal,
       annualNetBase,
@@ -470,47 +484,147 @@ function buildPaystubSnapshot(
   spouseName: string
 ) {
   const filingStatus = String(taxProfile.filing_status || 'married_filing_jointly');
+  const stateCode = String(taxProfile.state_code || '').trim().toUpperCase();
+  const isMfs = filingStatus === 'married_filing_separately';
   const hsaPlanType = String(taxProfile.hsa_plan_type || 'none');
   const hsaYtd = Math.max(0, num(taxProfile.hsa_contrib_ytd));
+  const dependentsCount = Math.max(0, Math.floor(num(taxProfile.dependents_count)));
+
+  const rawDetails = (taxProfile.paystub_details || {}) as Record<string, unknown>;
+  const tp = ((rawDetails?.tax_planning as Record<string, unknown>) || {}) as Record<
+    string,
+    unknown
+  >;
 
   const p = buildPersonPaystubSnapshot(taxProfile, 'primary', primaryName);
   const s = buildPersonPaystubSnapshot(taxProfile, 'spouse', spouseName);
 
   const combinedGrossComp = p.raw.annualGrossComp + s.raw.annualGrossComp;
   const combinedPreTax = p.raw.annualPreTaxTotal + s.raw.annualPreTaxTotal;
+
+  // Capital losses & realized gains (Schedule D)
+  const cfSt = Math.max(0, num(tp.cap_loss_carryforward_st));
+  const cfLt = Math.max(0, num(tp.cap_loss_carryforward_lt));
+  const totalCf = cfSt + cfLt;
+  const ytdGainsSt = Math.max(0, num(tp.cap_gains_realized_ytd_st));
+  const ytdGainsLt = Math.max(0, num(tp.cap_gains_realized_ytd_lt));
+  const totalYtdGains = ytdGainsSt + ytdGainsLt;
+  const ytdLossesSt = Math.max(0, num(tp.cap_losses_realized_ytd_st));
+  const ytdLossesLt = Math.max(0, num(tp.cap_losses_realized_ytd_lt));
+  const totalYtdLosses = ytdLossesSt + ytdLossesLt;
+  const totalLossesPool = totalCf + totalYtdLosses;
+  const netCapPos = totalYtdGains - totalLossesPool;
+  const capLossOrdLimit = isMfs ? IRS_2026.capLossOrdinaryLimitMfs : IRS_2026.capLossOrdinaryLimit;
+  const capLossOrdDed = netCapPos < 0 ? Math.min(capLossOrdLimit, Math.abs(netCapPos)) : 0;
+  const capGainsShielded = Math.min(totalYtdGains, totalLossesPool);
+  const remainingCfTo2027 =
+    netCapPos < 0 ? Math.max(0, Math.abs(netCapPos) - capLossOrdDed) : 0;
+  const netTaxableCapGain = netCapPos > 0 ? netCapPos : 0;
+
+  // OBBBA 2026 SALT cap & Itemized vs Standard Deduction
+  const ordinaryAgi = Math.max(0, combinedGrossComp - combinedPreTax - capLossOrdDed);
+  const estAgi = ordinaryAgi + netTaxableCapGain;
+  const saltBaseCap = isMfs ? IRS_2026.saltBaseCapMfs : IRS_2026.saltBaseCap;
+  const saltFloor = isMfs ? IRS_2026.saltFloorMfs : IRS_2026.saltFloor;
+  const saltThreshold = isMfs
+    ? IRS_2026.saltPhaseoutThresholdMfs
+    : IRS_2026.saltPhaseoutThreshold;
+  const saltEffectiveCap = Math.max(
+    saltFloor,
+    saltBaseCap - Math.max(0, estAgi - saltThreshold) * IRS_2026.saltPhaseoutRate
+  );
+  const inSaltPhaseout = estAgi > saltThreshold && saltEffectiveCap > saltFloor;
+
+  const autoStateFromPaystubs = p.raw.annualStateFromBase + s.raw.annualStateFromBase;
+  const stateOverride = Math.max(0, num(tp.state_local_income_tax_override));
+  const stateTaxForSalt = stateOverride > 0 ? stateOverride : autoStateFromPaystubs;
+  const mortgageInterest = Math.max(0, num(tp.mortgage_interest_annual));
+  const propertyTax = Math.max(0, num(tp.property_tax_annual));
+  const charitable = Math.max(0, num(tp.charitable_donations_annual));
+  const otherItemized = Math.max(0, num(tp.other_itemized_annual));
+  const rawSaltPaid = propertyTax + stateTaxForSalt;
+  const deductibleSalt = Math.min(rawSaltPaid, saltEffectiveCap);
+  const totalItemized = mortgageInterest + deductibleSalt + charitable + otherItemized;
+
   const stdDed =
     IRS_2026.standardDeduction[filingStatus] ?? IRS_2026.standardDeduction.married_filing_jointly;
-  const taxableInc = Math.max(0, combinedGrossComp - combinedPreTax - stdDed);
+  const deductionMode = String(tp.deduction_mode || 'auto');
+  const usingItemized =
+    deductionMode === 'itemized'
+      ? true
+      : deductionMode === 'standard'
+      ? false
+      : totalItemized > stdDed;
+  const appliedDed = usingItemized ? totalItemized : stdDed;
+  const excessOverStd = Math.max(0, totalItemized - stdDed);
+
+  const ordinaryTaxableInc = Math.max(0, ordinaryAgi - appliedDed);
   const brackets = IRS_2026.brackets[filingStatus] ?? IRS_2026.brackets.married_filing_jointly;
 
-  let estFedTax = 0;
+  let ordinaryTax = 0;
   let prevCap = 0;
   let marginalRate = brackets[0][1];
   for (const [cap, rate] of brackets) {
-    if (taxableInc <= prevCap) break;
-    const slice = Math.min(taxableInc, cap) - prevCap;
+    if (ordinaryTaxableInc <= prevCap) break;
+    const slice = Math.min(ordinaryTaxableInc, cap) - prevCap;
     if (slice > 0) {
-      estFedTax += slice * rate;
+      ordinaryTax += slice * rate;
       marginalRate = rate;
     }
     prevCap = cap;
   }
-  const marginalPct = taxableInc > 0 ? Math.round(marginalRate * 100) : 0;
+  const ltcgRate = estAgi > (filingStatus === 'married_filing_jointly' ? 600000 : 533000) ? 0.2 : 0.15;
+  const estTaxBeforeCtc = ordinaryTax + netTaxableCapGain * ltcgRate;
+  const ctcThreshold =
+    filingStatus === 'married_filing_jointly' ? IRS_2026.ctcPhaseoutMfj : IRS_2026.ctcPhaseoutOther;
+  const ctcExcessThousands =
+    estAgi > ctcThreshold ? Math.ceil((estAgi - ctcThreshold) / 1000) : 0;
+  const ctcCredit = Math.max(0, dependentsCount * IRS_2026.ctcPerChild - ctcExcessThousands * 50);
+  const estFedTax = Math.max(0, estTaxBeforeCtc - ctcCredit);
+  const marginalPct = ordinaryTaxableInc > 0 ? Math.round(marginalRate * 100) : 0;
 
   const hsaLimit =
     hsaPlanType === 'family' ? IRS_2026.hsaFamily : hsaPlanType === 'self' ? IRS_2026.hsaSelf : 0;
   const hsaProjectedTotal = p.raw.annualHsaTotal + s.raw.annualHsaTotal;
-  const depCareLimit =
-    filingStatus === 'married_filing_separately' ? IRS_2026.depCareFsaMfs : IRS_2026.depCareFsaMfj;
+  const depCareLimit = isMfs ? IRS_2026.depCareFsaMfs : IRS_2026.depCareFsaMfj;
   const depCareTotal = p.raw.annualDepCareFsa + s.raw.annualDepCareFsa;
 
-  const hasAnyFedWh = p.raw.hasFedTax || s.raw.hasFedTax;
+  const fedEstPaidYtd = Math.max(0, num(tp.fed_estimated_payments_ytd));
+  const stateEstPaidYtd = Math.max(0, num(tp.state_estimated_payments_ytd));
+  const hasAnyFedWh = p.raw.hasFedTax || s.raw.hasFedTax || fedEstPaidYtd > 0;
   const hasAnyTaxes = p.raw.hasPaystubTaxes || s.raw.hasPaystubTaxes;
   const projectedFedWh =
     p.raw.annualFedFromBase +
     s.raw.annualFedFromBase +
     p.raw.suppFedWithheld +
     s.raw.suppFedWithheld;
+  const projectedFedPayments = projectedFedWh + fedEstPaidYtd;
+  const projectedStatePayments = autoStateFromPaystubs + stateEstPaidYtd;
+
+  // W-4, State Allowances & 2025 Safe Harbor
+  const primaryW4Ded = Math.max(0, num(tp.primary_w4_deductions));
+  const spouseW4Ded = Math.max(0, num(tp.spouse_w4_deductions));
+  const combinedW4Ded = primaryW4Ded + spouseW4Ded;
+  const primaryW4Extra = Math.max(0, num(tp.primary_w4_extra_per_check));
+  const spouseW4Extra = Math.max(0, num(tp.spouse_w4_extra_per_check));
+  const primaryStateAllow = Math.max(0, Math.floor(num(tp.primary_state_allowances)));
+  const spouseStateAllow = Math.max(0, Math.floor(num(tp.spouse_state_allowances)));
+
+  const priorAgi = Math.max(0, num(tp.prior_year_agi));
+  const priorFedTax = Math.max(0, num(tp.prior_year_fed_total_tax));
+  const priorStateTax = Math.max(0, num(tp.prior_year_state_total_tax));
+  const priorRefundOrOwed = num(tp.prior_year_refund_or_owed);
+  const shHighThreshold = isMfs ? 75000 : 150000;
+  const shMult =
+    priorAgi > shHighThreshold || (priorAgi === 0 && estAgi > shHighThreshold) ? 1.1 : 1.0;
+  const fedShRequired =
+    priorFedTax > 0 ? Math.min(priorFedTax * shMult, estFedTax * 0.9) : estFedTax * 0.9;
+  const fedShMet = priorFedTax > 0 && hasAnyFedWh ? projectedFedPayments >= fedShRequired : undefined;
+  const stateShTarget = priorStateTax > 0 ? priorStateTax * shMult : 0;
+  const stateShMet =
+    priorStateTax > 0 && projectedStatePayments > 0
+      ? projectedStatePayments >= stateShTarget
+      : undefined;
 
   const marginalDec = marginalPct / 100;
   const suppGap =
@@ -547,16 +661,39 @@ function buildPaystubSnapshot(
   if (depCareTotal > depCareLimit + 1) {
     alerts.push(`Dependent Care FSA ($${Math.round(depCareTotal)}) exceeds $${depCareLimit} cap.`);
   }
+  if (inSaltPhaseout && rawSaltPaid > saltFloor + 500) {
+    alerts.push(
+      `OBBBA 2026 SALT cap phased down to $${Math.round(saltEffectiveCap)} (MAGI $${Math.round(estAgi)} > $${saltThreshold}).`
+    );
+  }
+  if (combinedW4Ded > 0 && totalItemized > 0 && combinedW4Ded - excessOverStd > 3000) {
+    alerts.push(
+      `W-4 Step 4(b) deductions ($${Math.round(combinedW4Ded)}) exceed excess itemized above standard ($${Math.round(excessOverStd)}).`
+    );
+  }
+  if (fedShMet === false) {
+    alerts.push(
+      `Federal Safe Harbor gap: projected $${Math.round(projectedFedPayments)} vs required $${Math.round(fedShRequired)}.`
+    );
+  }
+  if (stateShMet === false) {
+    alerts.push(
+      `${stateCode || 'State'} Safe Harbor gap: projected $${Math.round(projectedStatePayments)} vs ${Math.round(shMult * 100)}% 2025 target $${Math.round(stateShTarget)}.`
+    );
+  }
   if (suppGap >= 500) {
     alerts.push(
       `Supplemental bonus/RSU withholding gap ~$${Math.round(suppGap)} (marginal ${marginalPct}%).`
     );
   }
 
+  const expectingChild = Boolean(tp.expecting_child);
+  const dueMonth = String(tp.expected_child_due_month || '').trim();
+
   return compactObj({
     filing_status: filingStatus,
-    state_code: taxProfile.state_code || 'Not specified',
-    dependents_count: num(taxProfile.dependents_count),
+    state_code: stateCode || 'Not specified',
+    dependents_count: dependentsCount,
     hsa_plan_type: hsaPlanType,
     hsa_contrib_ytd: r2(hsaYtd),
     hsa_remaining_by_ytd: hsaLimit > 0 ? r2(Math.max(0, hsaLimit - hsaYtd)) : undefined,
@@ -574,13 +711,16 @@ function buildPaystubSnapshot(
           s.raw.annualEsppGain
       ),
       annual_pretax_deductions_from_paystubs: r2(combinedPreTax),
+      est_2026_agi: r2(estAgi),
+      deduction_used: usingItemized ? 'itemized' : 'standard',
+      applied_deduction_usd: r2(appliedDed),
       est_2026_fed_marginal_bracket_pct: marginalPct,
       est_2026_fed_effective_rate_pct:
         combinedGrossComp > 0 ? r2((estFedTax / combinedGrossComp) * 100) : undefined,
       est_2026_fed_tax_liability: r2(estFedTax),
-      projected_fed_withheld_from_paystubs_and_supp: hasAnyFedWh ? r2(projectedFedWh) : undefined,
+      projected_fed_payments_withheld_plus_est: hasAnyFedWh ? r2(projectedFedPayments) : undefined,
       est_fed_withholding_surplus_or_shortfall: hasAnyFedWh
-        ? r2(projectedFedWh - estFedTax)
+        ? r2(projectedFedPayments - estFedTax)
         : undefined,
       est_supplemental_rsu_bonus_withholding_gap: r2(suppGap),
       combined_monthly_net_base_take_home: hasAnyTaxes
@@ -589,6 +729,74 @@ function buildPaystubSnapshot(
       combined_annual_net_base_take_home: hasAnyTaxes
         ? r2(p.raw.annualNetBase + s.raw.annualNetBase)
         : undefined,
+    }),
+    itemized_and_salt_2026:
+      mortgageInterest > 0 || propertyTax > 0 || stateOverride > 0 || charitable > 0 || otherItemized > 0
+        ? compactObj({
+            deduction_mode: deductionMode,
+            mortgage_interest_annual: r2(mortgageInterest),
+            property_tax_annual: r2(propertyTax),
+            state_local_tax_for_salt: r2(stateTaxForSalt),
+            raw_salt_paid: r2(rawSaltPaid),
+            effective_2026_obbba_salt_cap: r2(saltEffectiveCap),
+            in_salt_30pct_phaseout_zone: inSaltPhaseout,
+            deductible_salt: r2(deductibleSalt),
+            charitable_donations: r2(charitable),
+            other_itemized: r2(otherItemized),
+            total_itemized_deductions: r2(totalItemized),
+            standard_deduction: r2(stdDed),
+            excess_over_standard_w4_4b_benchmark: r2(excessOverStd),
+          })
+        : undefined,
+    w4_and_state_withholding: compactObj({
+      primary_w4_step4b_deductions: r2(primaryW4Ded),
+      primary_w4_step4c_extra_per_check: r2(primaryW4Extra),
+      primary_state_allowances: primaryStateAllow,
+      spouse_w4_step4b_deductions: r2(spouseW4Ded),
+      spouse_w4_step4c_extra_per_check: r2(spouseW4Extra),
+      spouse_state_allowances: spouseStateAllow,
+      fed_estimated_payments_ytd: r2(fedEstPaidYtd),
+      state_estimated_payments_ytd: r2(stateEstPaidYtd),
+      withholding_notes: String(tp.withholding_notes || '').trim() || undefined,
+    }),
+    capital_losses_and_gains:
+      totalCf > 0 || totalYtdGains > 0 || totalYtdLosses > 0
+        ? compactObj({
+            prior_year_st_loss_carryforward: r2(cfSt),
+            prior_year_lt_loss_carryforward: r2(cfLt),
+            ytd_2026_st_losses: r2(ytdLossesSt),
+            ytd_2026_lt_losses: r2(ytdLossesLt),
+            ytd_2026_st_gains: r2(ytdGainsSt),
+            ytd_2026_lt_gains: r2(ytdGainsLt),
+            gains_shielded_tax_free_2026: r2(capGainsShielded),
+            ordinary_income_deduction_2026: r2(capLossOrdDed),
+            remaining_carryforward_into_2027: r2(remainingCfTo2027),
+            net_taxable_cap_gain_2026: r2(netTaxableCapGain),
+          })
+        : undefined,
+    prior_year_2025_tax_baseline: compactObj({
+      agi_2025: r2(priorAgi),
+      fed_total_tax_2025_line24: r2(priorFedTax),
+      state_total_tax_2025: r2(priorStateTax),
+      fed_refund_positive_or_owed_negative_2025:
+        Math.abs(priorRefundOrOwed) > 0.01 ? r2(priorRefundOrOwed) : undefined,
+      itemized_in_2025: Boolean(tp.prior_year_itemized),
+      safe_harbor_multiplier_pct: priorFedTax > 0 || priorStateTax > 0 ? Math.round(shMult * 100) : undefined,
+      fed_safe_harbor_required_2026: priorFedTax > 0 ? r2(fedShRequired) : undefined,
+      fed_safe_harbor_status:
+        fedShMet === true ? 'met' : fedShMet === false ? 'shortfall' : undefined,
+      state_safe_harbor_target_2026: priorStateTax > 0 ? r2(stateShTarget) : undefined,
+      state_safe_harbor_status:
+        stateShMet === true ? 'met' : stateShMet === false ? 'shortfall' : undefined,
+      notes_2025: String(tp.prior_year_notes || '').trim() || undefined,
+    }),
+    upcoming_life_events: compactObj({
+      expecting_child: expectingChild,
+      expected_child_due_month: dueMonth || undefined,
+      planned_529_annual: r2(Math.max(0, num(tp.planned_529_annual))),
+      expected_parental_leave_income_dip: r2(Math.max(0, num(tp.expected_leave_income_dip))),
+      expected_delivery_oop_cash_buffer: r2(Math.max(0, num(tp.expected_delivery_oop_buffer))),
+      life_event_notes: String(tp.life_event_notes || '').trim() || undefined,
     }),
     primary_pay_and_paystub: p.json,
     spouse_pay_and_paystub: s.json,
@@ -1035,7 +1243,7 @@ Deno.serve(async (req: Request) => {
       'Guidelines:',
       '1. Ground EVERY answer in the exact numbers from the LIVE HOUSEHOLD FINANCIAL SNAPSHOT below. Do not invent balances or accounts that are not listed.',
       '2. Be concrete, quantitative, and structured: use clear Markdown headings, bullet points, exact dollar figures, percentages, and prioritized action steps.',
-      '3. Tax & Paystub Optimization ("tax cheat codes"): Analyze 2026 IRS caps ($24,500 employee 401k Trad+Roth, $72,000 total 415(c) Mega Backdoor Roth, HSA $4,400 self / $8,750 family incl. employer seed, Healthcare FSA $3,400 / LPFSA rules, Dependent Care FSA $7,500 MFJ / $3,750 MFS, ESPP §423 $25,000 FMV limit & qualifying disposition, Social Security wage base $184,500, standard deduction $32,200 MFJ / $16,100 single). When per-paycheck paystub deductions are populated, audit Trad vs. Roth vs. After-Tax 401k pacing, employer true-up match forfeiture risk, federal/state/FICA paycheck withholding accuracy vs. estimated liability, RSU/bonus supplemental withholding gaps above 22%, tax-loss harvesting, and US/India cross-border reporting reminders (FBAR/Form 8938) when India assets exist.',
+      '3. Tax & Paystub Optimization ("tax cheat codes"): Analyze 2026 IRS & OBBBA rules ($24,500 employee 401k Trad+Roth, $72,000 total 415(c) Mega Backdoor Roth, HSA $4,400 self / $8,750 family incl. employer seed, Healthcare FSA $3,400 / LPFSA rules, Dependent Care FSA $7,500 MFJ / $3,750 MFS, ESPP §423 $25,000 FMV limit & qualifying disposition, Social Security wage base $184,500, standard deduction $32,200 MFJ / $16,100 single, OBBBA 2026 SALT cap $40,400 phasing down 30% above $505,000 MAGI to $10,000 floor, Child Tax Credit $2,200 phasing out above $400,000 MFJ, $1,000 Section 530A newborn Trump Account seed via Form 4547). When populated, audit itemized deductions vs. W-4 Step 4(b) deductions, state withholding allowances (for NY IT-2104, remember NY Schedule A excludes NY state income tax and phases out itemized deductions at higher NY AGI, and NY 529 offers up to $10,000/yr MFJ NY deduction), 2025 prior-year Safe Harbor (110% if 2025 AGI > $150k MFJ, or 90% of current-year tax), capital loss carryforward strategy ($3,000 ordinary offset + unlimited tax-free capital gain shielding for post-vest RSUs, covered call assignments, or rebalancing), upcoming baby timing (Dec 31 vs. Jan 1 tax-year cutoff, 30-day QLE for Family HSA & DCFSA, two-plan-year delivery OOP max & NY PFL), and US/India cross-border reporting reminders (FBAR/Form 8938) when India assets exist.',
       '4. Debt & 0% Promos: Always flag upcoming 0% balance transfer expirations and compute exact monthly payoff cash needed vs. liquid cash runway, and compare mortgage/auto loan APRs against after-tax risk-free yield.',
       '5. Covered Calls (CC) & Cash-Secured Puts (CSP): When asked about options income, ONLY reference eligible 100-share lots or actual available cash, and emphasize strict risk management (position sizing, avoiding earnings week, 20–30 delta OTM strikes, 30–45 DTE, assignment tax consequences on low-basis RSUs/stocks, and never risking emergency fund cash).',
       '6. Privacy & Safety: Never ask for SSN, home street address, full account numbers, or passwords. Include a brief one-line reminder on major tax/legal strategies to verify with a CPA when executing.',

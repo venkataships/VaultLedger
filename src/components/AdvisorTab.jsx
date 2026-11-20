@@ -54,7 +54,7 @@ const QUICK_PROMPTS = [
   {
     title: 'Paystub & 2026 Tax Audit',
     prompt:
-      'Audit our exact per-paycheck deductions (Traditional/Roth/After-Tax 401k, employer match & true-up risk, medical/dental, HSA, Healthcare/Dependent Care FSA, ESPP discount & §423 limit), check our federal withholding vs 2026 tax bracket including any RSU/bonus 22% withholding gap, and highlight any US/India FBAR or Form 8938 reminders.',
+      'Audit our complete 2026 tax picture: per-paycheck deductions (401k Trad/Roth/MBDR, true-up risk, HSA/FSA, ESPP), OBBBA 2026 itemized deductions & SALT cap/phaseout, W-4 & state withholding allowances vs 2025 Safe Harbor (including any RSU/bonus gap), capital loss carryforward optimization (tax-free RSU/covered call shielding), upcoming baby/2027 tax planning (CTC, QLE HSA/DCFSA, 529, $1k newborn Trump Account), and any US/India FBAR or Form 8938 reminders.',
   },
   {
     title: '0% Promos & Debt Waterfall',
@@ -784,6 +784,17 @@ export default function AdvisorTab({
               {paySummary.fedTax.marginalRatePct > 0 && (
                 <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2.5 py-0.5 font-mono text-violet-300 tabular-nums">
                   Est. {paySummary.fedTax.marginalRatePct}% Fed
+                  {paySummary.fedTax.usingItemized ? ' • Itemized' : ''}
+                </span>
+              )}
+              {paySummary.capLosses?.remainingCarryforwardTo2027 > 0 && (
+                <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-emerald-300 tabular-nums">
+                  Loss Shield: {mask(formatCurrency(paySummary.capLosses.remainingCarryforwardTo2027, { decimals: 0 }))}
+                </span>
+              )}
+              {paySummary.lifeEvents?.expectingChild && (
+                <span className="rounded-full border border-pink-500/30 bg-pink-500/10 px-2.5 py-0.5 text-pink-200">
+                  Baby Due: {paySummary.lifeEvents.dueMonth || 'Upcoming'}
                 </span>
               )}
               {(() => {

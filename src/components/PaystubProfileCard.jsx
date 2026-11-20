@@ -3,16 +3,21 @@ import {
   AlertTriangle,
   ArrowRightLeft,
   ArrowUpRight,
+  Baby,
   Briefcase,
   Calculator,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  FileText,
+  Home,
   Info,
   Save,
+  Scale,
   ShieldAlert,
   SlidersHorizontal,
   Sparkles,
+  TrendingDown,
   Users,
 } from 'lucide-react';
 import {
@@ -575,6 +580,569 @@ function PersonPaystubPanel({
   );
 }
 
+function TaxPlanningPanel({
+  profileForm,
+  setProfileForm,
+  setIsDirty,
+  summary,
+  householdNames,
+  mask,
+}) {
+  const tp = profileForm.paystub_details.tax_planning;
+  const stateCode = String(profileForm.state_code || '').trim().toUpperCase();
+  const isNy = stateCode === 'NY';
+  const { deductions, capLosses, safeHarbor, fedTax, lifeEvents } = summary;
+
+  const setTpField = (field, val) => {
+    setIsDirty(true);
+    setProfileForm((prev) => ({
+      ...prev,
+      paystub_details: {
+        ...prev.paystub_details,
+        tax_planning: {
+          ...prev.paystub_details.tax_planning,
+          [field]: val,
+        },
+      },
+    }));
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Section 1: 2026 Itemized Deductions & OBBBA SALT Cap */}
+      <div className="rounded-xl border border-emerald-500/20 bg-zinc-900/35 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-2.5">
+          <div className="flex items-center gap-2">
+            <Home className="h-4 w-4 text-emerald-400" />
+            <div>
+              <div className="text-xs font-semibold text-zinc-100">
+                2026 Itemized Deductions & OBBBA SALT Engine
+              </div>
+              <div className="text-[10px] text-zinc-400">
+                2026 SALT cap is {mask(formatCurrency(deductions.saltBaseCap, { decimals: 0 }))}, phasing down 30¢/$1 above{' '}
+                {mask(formatCurrency(deductions.saltPhaseoutThreshold, { decimals: 0 }))} MAGI (floor{' '}
+                {mask(formatCurrency(deductions.saltFloor, { decimals: 0 }))}).
+              </div>
+            </div>
+          </div>
+
+          <span
+            className={`rounded-full border px-2.5 py-0.5 font-mono text-[11px] tabular-nums ${
+              fedTax.usingItemized
+                ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-200'
+                : 'border-zinc-700 bg-zinc-900 text-zinc-300'
+            }`}
+          >
+            Active: {fedTax.usingItemized ? 'Itemized' : 'Standard'} (
+            {mask(formatCurrency(fedTax.appliedDeduction, { decimals: 0 }))})
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
+          <label className="block text-zinc-300">
+            <span className="text-[11px]">Deduction Mode</span>
+            <select
+              value={tp.deduction_mode}
+              onChange={(e) => setTpField('deduction_mode', e.target.value)}
+              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100"
+            >
+              <option value="auto">Auto (Max of Std vs Itemized)</option>
+              <option value="itemized">Force Itemized (Sch A)</option>
+              <option value="standard">Force Standard</option>
+            </select>
+          </label>
+
+          <PaycheckMoneyInput
+            label="Mortgage Interest ($/yr)"
+            step="500"
+            value={tp.mortgage_interest_annual}
+            onChange={(v) => setTpField('mortgage_interest_annual', v)}
+            subtext="Form 1098 deductible interest"
+          />
+
+          <PaycheckMoneyInput
+            label="Property Taxes ($/yr)"
+            step="500"
+            value={tp.property_tax_annual}
+            onChange={(v) => setTpField('property_tax_annual', v)}
+            subtext="Real estate / school taxes"
+          />
+
+          <PaycheckMoneyInput
+            label="State/Local Tax Override ($/yr)"
+            step="500"
+            placeholder={
+              deductions.autoStateTaxFromPaystubs > 0
+                ? String(Math.round(deductions.autoStateTaxFromPaystubs))
+                : '0'
+            }
+            value={tp.state_local_income_tax_override}
+            onChange={(v) => setTpField('state_local_income_tax_override', v)}
+            subtext={
+              deductions.autoStateTaxFromPaystubs > 0
+                ? `Auto from paystubs: ${mask(
+                    formatCurrency(deductions.autoStateTaxFromPaystubs, { decimals: 0 })
+                  )}/yr`
+                : 'Leave blank to use paystub state W/H'
+            }
+          />
+
+          <PaycheckMoneyInput
+            label="Charity / DAF ($/yr)"
+            step="100"
+            value={tp.charitable_donations_annual}
+            onChange={(v) => setTpField('charitable_donations_annual', v)}
+            subtext="Cash / appreciated stock"
+          />
+
+          <PaycheckMoneyInput
+            label="Other Itemized ($/yr)"
+            step="100"
+            value={tp.other_itemized_annual}
+            onChange={(v) => setTpField('other_itemized_annual', v)}
+            subtext="Points / qualified Sch A"
+          />
+        </div>
+
+        {/* Live Itemized vs Standard & SALT Cap Strip */}
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-zinc-800/90 bg-zinc-950/75 px-3.5 py-2.5 text-[11px] tabular-nums">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-zinc-300">
+            <span>
+              Effective 2026 SALT Cap:{' '}
+              <strong
+                className={`font-mono ${
+                  deductions.inSaltPhaseoutZone ? 'text-amber-300' : 'text-emerald-300'
+                }`}
+              >
+                {mask(formatCurrency(deductions.saltEffectiveCap, { decimals: 0 }))}
+              </strong>
+              {deductions.rawSaltPaid > 0 && (
+                <span className="text-zinc-500">
+                  {' '}
+                  (deducting {mask(formatCurrency(deductions.deductibleSalt, { decimals: 0 }))} of{' '}
+                  {mask(formatCurrency(deductions.rawSaltPaid, { decimals: 0 }))} paid)
+                </span>
+              )}
+            </span>
+            <span>
+              Itemized Total:{' '}
+              <strong className="font-mono text-zinc-100">
+                {mask(formatCurrency(deductions.totalItemized, { decimals: 0 }))}
+              </strong>
+              <span className="text-zinc-500">
+                {' '}
+                vs Std {mask(formatCurrency(deductions.standardDeduction, { decimals: 0 }))}
+              </span>
+            </span>
+          </div>
+          <span className="font-mono text-emerald-300">
+            Excess over Std (W-4 4b benchmark):{' '}
+            <strong>{mask(formatCurrency(deductions.excessOverStandard, { decimals: 0 }))}</strong>
+          </span>
+        </div>
+      </div>
+
+      {/* Section 2: W-4 & State Withholding Adjustments + Estimated Payments */}
+      <div className="rounded-xl border border-zinc-800/90 bg-zinc-900/35 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-2.5">
+          <div className="flex items-center gap-2">
+            <Scale className="h-4 w-4 text-amber-400" />
+            <div>
+              <div className="text-xs font-semibold text-zinc-100">
+                W-4 & {stateCode || 'State'} Withholding Adjustments + Estimated Tax Payments
+              </div>
+              <div className="text-[10px] text-zinc-400">
+                Record custom W-4 Step 4(b) deductions (e.g., $34,000), state allowances (e.g., NY IT-2104: 14), and quarterly estimated payments so AI CFO audits withholding accuracy.
+              </div>
+            </div>
+          </div>
+          {deductions.excessOverStandard > 0 && safeHarbor.combinedW4Deductions > 0 && (
+            <span className="font-mono text-[11px] text-zinc-300 tabular-nums">
+              W-4 4(b):{' '}
+              <strong>{mask(formatCurrency(safeHarbor.combinedW4Deductions, { decimals: 0 }))}</strong>{' '}
+              vs Excess Itemized:{' '}
+              <strong className="text-emerald-300">
+                {mask(formatCurrency(deductions.excessOverStandard, { decimals: 0 }))}
+              </strong>
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          <PaycheckMoneyInput
+            label={`${householdNames.primary_name} W-4 4(b) Ded. ($)`}
+            step="1000"
+            placeholder="e.g., 34000"
+            value={tp.primary_w4_deductions}
+            onChange={(v) => setTpField('primary_w4_deductions', v)}
+            subtext="Extra annual deductions"
+          />
+          <PaycheckMoneyInput
+            label={`${householdNames.primary_name} W-4 4(c) Extra/Chk`}
+            step="25"
+            value={tp.primary_w4_extra_per_check}
+            onChange={(v) => setTpField('primary_w4_extra_per_check', v)}
+            subtext="Extra fed W/H per check"
+          />
+          <PaycheckMoneyInput
+            label={`${householdNames.primary_name} ${stateCode || 'State'} Allowances`}
+            step="1"
+            max="99"
+            placeholder={isNy ? 'e.g., 14 (IT-2104)' : 'e.g., 2'}
+            value={tp.primary_state_allowances}
+            onChange={(v) => setTpField('primary_state_allowances', v)}
+            subtext={isNy ? 'NY IT-2104 allowances' : 'State W-4 allowances'}
+          />
+          <PaycheckMoneyInput
+            label={`${householdNames.spouse_name} W-4 4(b) Ded. ($)`}
+            step="1000"
+            value={tp.spouse_w4_deductions}
+            onChange={(v) => setTpField('spouse_w4_deductions', v)}
+            subtext="Extra annual deductions"
+          />
+          <PaycheckMoneyInput
+            label={`${householdNames.spouse_name} W-4 4(c) Extra/Chk`}
+            step="25"
+            value={tp.spouse_w4_extra_per_check}
+            onChange={(v) => setTpField('spouse_w4_extra_per_check', v)}
+            subtext="Extra fed W/H per check"
+          />
+          <PaycheckMoneyInput
+            label={`${householdNames.spouse_name} ${stateCode || 'State'} Allowances`}
+            step="1"
+            max="99"
+            value={tp.spouse_state_allowances}
+            onChange={(v) => setTpField('spouse_state_allowances', v)}
+            subtext={isNy ? 'NY IT-2104 allowances' : 'State W-4 allowances'}
+          />
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <PaycheckMoneyInput
+            label="2026 Federal Estimated Tax Paid YTD ($)"
+            step="250"
+            value={tp.fed_estimated_payments_ytd}
+            onChange={(v) => setTpField('fed_estimated_payments_ytd', v)}
+            subtext="1040-ES quarterly payments"
+          />
+          <PaycheckMoneyInput
+            label={`2026 ${stateCode || 'State'} Estimated Tax Paid YTD ($)`}
+            step="250"
+            value={tp.state_estimated_payments_ytd}
+            onChange={(v) => setTpField('state_estimated_payments_ytd', v)}
+            subtext={isNy ? 'NY IT-2105 quarterly payments' : 'State quarterly payments'}
+          />
+          <label className="block text-zinc-300">
+            <span className="text-[11px]">Withholding Timing / Notes (optional)</span>
+            <input
+              type="text"
+              placeholder="e.g., Adjusted W-4 to $34k & NY IT-2104 to 14 mid-year"
+              value={tp.withholding_notes}
+              onChange={(e) => setTpField('withholding_notes', e.target.value)}
+              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 focus:border-emerald-500/50 focus:outline-none"
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* Section 3: Capital Loss Carryforward & 2026 Realized Gains/Losses */}
+      <div className="rounded-xl border border-zinc-800/90 bg-zinc-900/35 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-2.5">
+          <div className="flex items-center gap-2">
+            <TrendingDown className="h-4 w-4 text-sky-400" />
+            <div>
+              <div className="text-xs font-semibold text-zinc-100">
+                Capital Loss Carryforward & 2026 Realized Gains / Losses (Schedule D)
+              </div>
+              <div className="text-[10px] text-zinc-400">
+                Offsets 2026 realized gains dollar-for-dollar, deducts up to $3,000 ($1,500 MFS) against ordinary income, and carries the rest forward indefinitely.
+              </div>
+            </div>
+          </div>
+          {capLosses.hasActivity && (
+            <span className="rounded-full border border-sky-500/35 bg-sky-500/10 px-2.5 py-0.5 font-mono text-[11px] text-sky-200 tabular-nums">
+              Carryforward to 2027:{' '}
+              <strong>
+                {mask(formatCurrency(capLosses.remainingCarryforwardTo2027, { decimals: 0 }))}
+              </strong>
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+          <PaycheckMoneyInput
+            label="2025 ST Loss Carryforward ($)"
+            step="500"
+            value={tp.cap_loss_carryforward_st}
+            onChange={(v) => setTpField('cap_loss_carryforward_st', v)}
+            subtext="From 2025 Sch D Line 6"
+          />
+          <PaycheckMoneyInput
+            label="2025 LT Loss Carryforward ($)"
+            step="500"
+            value={tp.cap_loss_carryforward_lt}
+            onChange={(v) => setTpField('cap_loss_carryforward_lt', v)}
+            subtext="From 2025 Sch D Line 14"
+          />
+          <PaycheckMoneyInput
+            label="2026 YTD Realized ST Losses ($)"
+            step="500"
+            value={tp.cap_losses_realized_ytd_st}
+            onChange={(v) => setTpField('cap_losses_realized_ytd_st', v)}
+            subtext="Enter positive dollar loss"
+          />
+          <PaycheckMoneyInput
+            label="2026 YTD Realized LT Losses ($)"
+            step="500"
+            value={tp.cap_losses_realized_ytd_lt}
+            onChange={(v) => setTpField('cap_losses_realized_ytd_lt', v)}
+            subtext="Enter positive dollar loss"
+          />
+          <PaycheckMoneyInput
+            label="2026 YTD Realized ST Gains ($)"
+            step="500"
+            value={tp.cap_gains_realized_ytd_st}
+            onChange={(v) => setTpField('cap_gains_realized_ytd_st', v)}
+            subtext="Short-term / options gains"
+          />
+          <PaycheckMoneyInput
+            label="2026 YTD Realized LT Gains ($)"
+            step="500"
+            value={tp.cap_gains_realized_ytd_lt}
+            onChange={(v) => setTpField('cap_gains_realized_ytd_lt', v)}
+            subtext="Long-term stock / ETF gains"
+          />
+        </div>
+
+        {capLosses.hasActivity && (
+          <div className="flex flex-wrap items-center gap-x-5 gap-y-1 rounded-lg border border-zinc-800/90 bg-zinc-950/75 px-3.5 py-2.5 text-[11px] text-zinc-300 tabular-nums">
+            <span>
+              Total Loss Pool:{' '}
+              <strong className="font-mono text-zinc-100">
+                {mask(formatCurrency(capLosses.totalLossesAvailable, { decimals: 0 }))}
+              </strong>
+            </span>
+            <span>
+              2026 Gains Shielded Tax-Free:{' '}
+              <strong className="font-mono text-emerald-300">
+                {mask(formatCurrency(capLosses.gainsShielded, { decimals: 0 }))}
+              </strong>
+            </span>
+            <span>
+              2026 Ordinary AGI Deduction:{' '}
+              <strong className="font-mono text-sky-300">
+                −{mask(formatCurrency(capLosses.ordinaryDeduction, { decimals: 0 }))}
+              </strong>
+            </span>
+            {capLosses.netTaxableCapGain > 0 ? (
+              <span>
+                Net Taxable Cap Gain:{' '}
+                <strong className="font-mono text-amber-300">
+                  {mask(formatCurrency(capLosses.netTaxableCapGain, { decimals: 0 }))}
+                </strong>
+              </span>
+            ) : (
+              <span>
+                Tax-Free Gain Room Left:{' '}
+                <strong className="font-mono text-emerald-300">
+                  {mask(formatCurrency(capLosses.remainingCarryforwardTo2027, { decimals: 0 }))}
+                </strong>
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Section 4: 2025 Prior-Year Tax Return Baseline (Safe Harbor) */}
+      <div className="rounded-xl border border-zinc-800/90 bg-zinc-900/35 p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-2.5">
+          <div className="flex items-center gap-2">
+            <FileText className="h-4 w-4 text-violet-400" />
+            <div>
+              <div className="text-xs font-semibold text-zinc-100">
+                2025 Prior-Year Tax Return Baseline (Zero-PII Safe Harbor)
+              </div>
+              <div className="text-[10px] text-zinc-400">
+                Entering 2025 Form 1040 Line 11 & Line 24 lets us compute exact 110% IRS & State Safe Harbor thresholds to prevent underpayment penalties.
+              </div>
+            </div>
+          </div>
+          {safeHarbor.priorYearFedTax > 0 && (
+            <span
+              className={`rounded-full border px-2.5 py-0.5 font-mono text-[11px] tabular-nums ${
+                safeHarbor.fedSafeHarborMet === true
+                  ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-200'
+                  : safeHarbor.fedSafeHarborMet === false
+                  ? 'border-amber-500/35 bg-amber-500/15 text-amber-200'
+                  : 'border-zinc-700 bg-zinc-900 text-zinc-300'
+              }`}
+            >
+              Fed Safe Harbor ({Math.round(safeHarbor.safeHarborMultiplier * 100)}% / 90%):{' '}
+              {mask(formatCurrency(safeHarbor.fedSafeHarborRequired, { decimals: 0 }))}
+              {safeHarbor.fedSafeHarborMet === true
+                ? ' ✓ Met'
+                : safeHarbor.fedSafeHarborMet === false
+                ? ` • Short ${mask(formatCurrency(safeHarbor.fedSafeHarborGap, { decimals: 0 }))}`
+                : ''}
+            </span>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+          <PaycheckMoneyInput
+            label="2025 Federal AGI ($)"
+            step="1000"
+            value={tp.prior_year_agi}
+            onChange={(v) => setTpField('prior_year_agi', v)}
+            subtext="Form 1040 Line 11 (sets 100%/110%)"
+          />
+          <PaycheckMoneyInput
+            label="2025 Total Federal Tax ($)"
+            step="500"
+            value={tp.prior_year_fed_total_tax}
+            onChange={(v) => setTpField('prior_year_fed_total_tax', v)}
+            subtext="Form 1040 Line 24 (Safe Harbor)"
+          />
+          <PaycheckMoneyInput
+            label={`2025 Total ${stateCode || 'State'} Tax ($)`}
+            step="500"
+            value={tp.prior_year_state_total_tax}
+            onChange={(v) => setTpField('prior_year_state_total_tax', v)}
+            subtext={isNy ? 'NY IT-201 total tax' : 'Prior-year state total tax'}
+          />
+          <label className="block text-zinc-300">
+            <span className="text-[11px]">2025 Fed Refund (+) / Owed (−) ($)</span>
+            <input
+              type="number"
+              step="100"
+              placeholder="e.g., -4200 or 1800"
+              value={tp.prior_year_refund_or_owed}
+              onChange={(e) => setTpField('prior_year_refund_or_owed', e.target.value)}
+              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 font-mono text-xs text-zinc-100 focus:border-emerald-500/50 focus:outline-none"
+            />
+            <div className="mt-0.5 text-[10px] text-zinc-500">Use negative if you owed</div>
+          </label>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-4 items-end">
+          <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-[11px] text-zinc-300">
+            <input
+              type="checkbox"
+              checked={Boolean(tp.prior_year_itemized)}
+              onChange={(e) => setTpField('prior_year_itemized', e.target.checked)}
+              className="rounded border-zinc-700 bg-zinc-900 text-violet-500"
+            />
+            Itemized deductions in 2025
+          </label>
+          <label className="block text-zinc-300 sm:col-span-3">
+            <span className="text-[11px]">2025 Tax Return Context Notes (zero-PII — for AI CFO)</span>
+            <input
+              type="text"
+              placeholder="e.g., Paid NIIT 3.8%, filed FBAR/Form 8938 for India assets, did Backdoor Roth (Form 8606), no AMT"
+              value={tp.prior_year_notes}
+              onChange={(e) => setTpField('prior_year_notes', e.target.value)}
+              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 focus:border-emerald-500/50 focus:outline-none"
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* Section 5: Upcoming Life Events (Baby / Family Planning) */}
+      <div className="rounded-xl border border-pink-500/20 bg-pink-500/[0.03] p-4 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-zinc-800 pb-2.5">
+          <div className="flex items-center gap-2">
+            <Baby className="h-4 w-4 text-pink-300" />
+            <div>
+              <div className="text-xs font-semibold text-zinc-100">
+                Upcoming Life Events & Family Planning (e.g., Baby Due Jan 2027)
+              </div>
+              <div className="text-[10px] text-zinc-400">
+                Helps Claude CFO model cash buffers across two medical plan years, parental leave dip, $2,200 CTC cutoff, QLE Family HSA & $7,500 DCFSA, $1,000 newborn Trump Account, and 529 state deductions.
+              </div>
+            </div>
+          </div>
+
+          <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-pink-500/30 bg-pink-500/10 px-3 py-1.5 text-[11px] font-medium text-pink-200">
+            <input
+              type="checkbox"
+              checked={Boolean(tp.expecting_child)}
+              onChange={(e) => setTpField('expecting_child', e.target.checked)}
+              className="rounded border-zinc-700 bg-zinc-900 text-pink-500"
+            />
+            Expecting a baby / new dependent
+          </label>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <label className="block text-zinc-300">
+            <span className="text-[11px]">Expected Due Month (YYYY-MM)</span>
+            <input
+              type="month"
+              value={tp.expected_child_due_month}
+              onChange={(e) => setTpField('expected_child_due_month', e.target.value)}
+              className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 font-mono text-xs text-zinc-100 focus:border-pink-500/50 focus:outline-none"
+            />
+            <div className="mt-0.5 text-[10px] text-zinc-500">
+              Dec 2026 vs Jan 2027 shifts CTC tax year
+            </div>
+          </label>
+
+          <PaycheckMoneyInput
+            label="Planned 529 Contribution ($/yr)"
+            step="500"
+            placeholder={isNy ? '10000' : '5000'}
+            value={tp.planned_529_annual}
+            onChange={(v) => setTpField('planned_529_annual', v)}
+            subtext={
+              isNy
+                ? 'NY gives up to $10k/yr MFJ state deduction'
+                : 'Check your state 529 tax deduction'
+            }
+          />
+
+          <PaycheckMoneyInput
+            label="Est. Parental Leave Income Dip ($)"
+            step="500"
+            value={tp.expected_leave_income_dip}
+            onChange={(v) => setTpField('expected_leave_income_dip', v)}
+            subtext={isNy ? 'Net gap after NY PFL / employer leave' : 'Unpaid leave / STD gap'}
+          />
+
+          <PaycheckMoneyInput
+            label="Delivery OOP + Baby Cash Buffer ($)"
+            step="500"
+            value={tp.expected_delivery_oop_buffer}
+            onChange={(v) => setTpField('expected_delivery_oop_buffer', v)}
+            subtext="2026 prenatal + 2027 delivery OOP max"
+          />
+        </div>
+
+        <label className="block text-zinc-300">
+          <span className="text-[11px]">Family & Life Event Planning Notes (for AI CFO)</span>
+          <input
+            type="text"
+            placeholder="e.g., Baby due Jan 2027 — plan NY PFL, 30-day QLE switch to Family HSA/HDHP, $7,500 DCFSA, open NY 529 & $1k newborn Trump Account"
+            value={tp.life_event_notes}
+            onChange={(e) => setTpField('life_event_notes', e.target.value)}
+            className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-100 focus:border-pink-500/50 focus:outline-none"
+          />
+        </label>
+
+        {lifeEvents.expectingChild && (
+          <div className="rounded-lg border border-pink-500/25 bg-zinc-950/75 px-3.5 py-2.5 text-[11px] text-zinc-300 leading-relaxed">
+            <strong className="text-pink-200">Newborn Tax & Cash Checklist:</strong>{' '}
+            <span>
+              $2,200 Child Tax Credit (phases out &gt;$400k MFJ) • $1,000 federal Section 530A newborn seed (Form 4547) • 30-day post-birth QLE to enroll baby, switch to Family HSA ($8,750+) & start Dependent Care FSA ($7,500 MFJ)
+              {isNy ? ' • NY 529 $10,000/yr MFJ deduction & NY Paid Family Leave (PFL)' : ''}
+              {' • Budget for two medical deductible years if prenatal (2026) & delivery (2027) span Jan 1.'}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export default function PaystubProfileCard({
   supabase,
   session,
@@ -768,7 +1336,21 @@ export default function PaystubProfileCard({
 
       {summary.combinedGrossComp > 0 && summary.fedTax.marginalRatePct > 0 && (
         <span className="rounded-full border border-violet-500/30 bg-violet-500/10 px-2 py-0.5 font-mono text-[11px] text-violet-300 tabular-nums">
-          Est. {summary.fedTax.marginalRatePct}% Fed Bracket
+          Est. {summary.fedTax.marginalRatePct}% Fed
+          {summary.fedTax.usingItemized ? ' • Itemized' : ''}
+        </span>
+      )}
+
+      {summary.capLosses?.remainingCarryforwardTo2027 > 0 && (
+        <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2 py-0.5 font-mono text-[11px] text-sky-300 tabular-nums">
+          Loss Shield:{' '}
+          {mask(formatCurrency(summary.capLosses.remainingCarryforwardTo2027, { decimals: 0 }))}
+        </span>
+      )}
+
+      {summary.lifeEvents?.expectingChild && (
+        <span className="rounded-full border border-pink-500/30 bg-pink-500/10 px-2 py-0.5 text-[11px] text-pink-200">
+          Baby Due: {summary.lifeEvents.dueMonth || 'Upcoming'}
         </span>
       )}
 
@@ -860,6 +1442,21 @@ export default function PaystubProfileCard({
               >
                 <Users className="h-3.5 w-3.5" />
                 Household Summary & Tax
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSubTab('tax_planning')}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-medium transition ${
+                  activeSubTab === 'tax_planning'
+                    ? 'bg-violet-500/20 text-violet-200 ring-1 ring-violet-500/40'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <Scale className="h-3.5 w-3.5" />
+                Deductions, Losses & Life
+                {summary.hasTaxPlanningInputs && (
+                  <span className="h-1.5 w-1.5 rounded-full bg-violet-400" />
+                )}
               </button>
               <button
                 type="button"
@@ -1079,7 +1676,20 @@ export default function PaystubProfileCard({
 
                 {/* KPI 4: Est. 2026 Federal Tax */}
                 <div className="rounded-xl border border-zinc-800 bg-zinc-900/45 p-3.5">
-                  <div className="text-[11px] text-zinc-400">Est. 2026 Federal Tax</div>
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-400">
+                    <span>Est. 2026 Federal Tax</span>
+                    <span
+                      className={`rounded px-1.5 py-0.5 font-mono text-[9px] ${
+                        summary.fedTax.usingItemized
+                          ? 'bg-emerald-500/15 text-emerald-300'
+                          : 'bg-zinc-800 text-zinc-400'
+                      }`}
+                    >
+                      {summary.fedTax.usingItemized
+                        ? `Itemized ${mask(formatCurrency(summary.fedTax.appliedDeduction, { compact: true, decimals: 0 }))}`
+                        : `Std ${mask(formatCurrency(summary.fedTax.appliedDeduction, { compact: true, decimals: 0 }))}`}
+                    </span>
+                  </div>
                   <div className="mt-1 flex items-baseline gap-2 font-mono text-lg font-semibold text-amber-300 tabular-nums">
                     <span>
                       {summary.combinedGrossComp > 0
@@ -1092,7 +1702,7 @@ export default function PaystubProfileCard({
                       </span>
                     )}
                   </div>
-                  <div className="mt-1 text-[10px] text-zinc-400 tabular-nums">
+                  <div className="mt-1 flex flex-wrap items-center gap-x-2 text-[10px] text-zinc-400 tabular-nums">
                     {summary.estFedWithholdingDiff !== null ? (
                       <span
                         className={
@@ -1116,8 +1726,73 @@ export default function PaystubProfileCard({
                         {mask(formatCurrency(summary.fedTax.estimatedTax, { decimals: 0 }))}/yr
                       </span>
                     )}
+                    {summary.safeHarbor.fedSafeHarborMet === true && (
+                      <span className="text-emerald-400">• Safe Harbor ✓</span>
+                    )}
+                    {summary.safeHarbor.fedSafeHarborMet === false && (
+                      <span className="text-amber-300">• Safe Harbor Gap</span>
+                    )}
                   </div>
                 </div>
+              </div>
+
+              {/* Compact Tax Strategy, Capital Losses & Life Events Banner */}
+              <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-zinc-800/80 bg-zinc-900/35 px-4 py-2.5 text-[11px]">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-zinc-300 tabular-nums">
+                  {summary.hasTaxPlanningInputs ? (
+                    <>
+                      {summary.deductions.hasItemizedInputs && (
+                        <span>
+                          Itemized:{' '}
+                          <strong className="font-mono text-emerald-300">
+                            {mask(formatCurrency(summary.deductions.totalItemized, { decimals: 0 }))}
+                          </strong>
+                          <span className="text-zinc-500">
+                            {' '}
+                            (SALT {mask(formatCurrency(summary.deductions.deductibleSalt, { decimals: 0 }))} / cap{' '}
+                            {mask(formatCurrency(summary.deductions.saltEffectiveCap, { decimals: 0 }))})
+                          </span>
+                        </span>
+                      )}
+                      {summary.safeHarbor.combinedW4Deductions > 0 && (
+                        <span>
+                          W-4 4(b):{' '}
+                          <strong className="font-mono text-amber-300">
+                            {mask(formatCurrency(summary.safeHarbor.combinedW4Deductions, { decimals: 0 }))}
+                          </strong>
+                        </span>
+                      )}
+                      {summary.capLosses.hasActivity && (
+                        <span>
+                          Cap Loss Shield:{' '}
+                          <strong className="font-mono text-sky-300">
+                            {mask(
+                              formatCurrency(summary.capLosses.remainingCarryforwardTo2027, {
+                                decimals: 0,
+                              })
+                            )}
+                          </strong>
+                        </span>
+                      )}
+                      {summary.lifeEvents.expectingChild && (
+                        <span className="text-pink-200">
+                          Baby Due: <strong>{summary.lifeEvents.dueMonth || 'Upcoming'}</strong>
+                        </span>
+                      )}
+                    </>
+                  ) : (
+                    <span className="text-zinc-400">
+                      Have mortgage interest / OBBBA SALT deductions, W-4/state withholding tweaks, capital loss carryforward, 2025 tax baseline, or an upcoming baby?
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveSubTab('tax_planning')}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-violet-500/35 bg-violet-500/15 px-2.5 py-1 font-medium text-violet-200 hover:bg-violet-500/25"
+                >
+                  {summary.hasTaxPlanningInputs ? 'Edit Deductions, Losses & Life' : 'Configure Tax Strategy →'}
+                </button>
               </div>
 
               {/* Combined Base Paycheck Waterfall Bar */}
@@ -1339,7 +2014,19 @@ export default function PaystubProfileCard({
             </div>
           )}
 
-          {/* SUB-TAB 2: PRIMARY PAYSTUB */}
+          {/* SUB-TAB 2: DEDUCTIONS, LOSSES, 2025 BASELINE & LIFE EVENTS */}
+          {activeSubTab === 'tax_planning' && (
+            <TaxPlanningPanel
+              profileForm={profileForm}
+              setProfileForm={setProfileForm}
+              setIsDirty={setIsDirty}
+              summary={summary}
+              householdNames={householdNames}
+              mask={mask}
+            />
+          )}
+
+          {/* SUB-TAB 3: PRIMARY PAYSTUB */}
           {activeSubTab === 'primary' && (
             <PersonPaystubPanel
               personKey="primary"
@@ -1352,7 +2039,7 @@ export default function PaystubProfileCard({
             />
           )}
 
-          {/* SUB-TAB 3: SPOUSE PAYSTUB */}
+          {/* SUB-TAB 4: SPOUSE PAYSTUB */}
           {activeSubTab === 'spouse' && (
             <PersonPaystubPanel
               personKey="spouse"
@@ -1365,12 +2052,12 @@ export default function PaystubProfileCard({
             />
           )}
 
-          {/* Persistent Save Footer across all 3 sub-tabs */}
+          {/* Persistent Save Footer across all 4 sub-tabs */}
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-[11px]">
             <div className="flex flex-wrap items-center gap-3 text-zinc-400">
               <Sparkles className="h-3.5 w-3.5 text-emerald-400" />
               <span>
-                Claude CFO reads all paycheck deductions, withholdings, employer match & IRS caps on every prompt.
+                Claude CFO reads all paychecks, OBBBA SALT/itemized deductions, W-4/state allowances, capital loss carryforwards, 2025 Safe Harbor & life events on every prompt.
               </span>
             </div>
 
