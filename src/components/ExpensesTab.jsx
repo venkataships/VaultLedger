@@ -85,6 +85,7 @@ export default function ExpensesTab({
   const [billEssential, setBillEssential] = useState(true);
   const [savingBill, setSavingBill] = useState(false);
   const [postingBills, setPostingBills] = useState(false);
+  const [postingBillId, setPostingBillId] = useState(null);
 
   useEffect(() => {
     const nextOwner = ['primary', 'spouse', 'joint'].includes(householdScope)
@@ -138,12 +139,18 @@ export default function ExpensesTab({
     const monthlyBudget = budgetRow ? toNumber(budgetRow.monthly_limit) : 0;
     const monthlyTakeHome = takeHomeRow ? toNumber(takeHomeRow.monthly_limit) : 0;
 
-    // Unposted active monthly recurring bills/credits for selectedMonth
+    // Unposted active monthly and periodic (annual/quarterly) recurring bills/credits for selectedMonth
     const postedBillIds = new Set(
       monthExpenses.map((e) => e.recurring_bill_id).filter(Boolean)
     );
     const unpostedMonthlyBills = (recurringBills || []).filter(
       (b) => b.is_active && b.cadence === 'monthly' && !postedBillIds.has(b.id)
+    );
+    const unpostedPeriodicBills = (recurringBills || []).filter(
+      (b) =>
+        b.is_active &&
+        (b.cadence === 'annual' || b.cadence === 'quarterly') &&
+        !postedBillIds.has(b.id)
     );
 
     let activeBillsMonthly = 0;
@@ -168,7 +175,9 @@ export default function ExpensesTab({
       categoriesSorted: expSummary.categoriesSorted,
       monthlyBudget,
       monthlyTakeHome,
+      postedBillIds,
       unpostedMonthlyBills,
+      unpostedPeriodicBills,
       activeBillsMonthly,
       activeCreditsMonthly,
       netRecurringMonthly: activeBillsMonthly - activeCreditsMonthly,
@@ -262,35 +271,76 @@ export default function ExpensesTab({
     await onDataChanged();
   };
 
+  const buildExpenseRowFromBill = (bill, mode = 'full') => {
+    const [y, m] = selectedMonth.split('-').map(Number);
+    const maxDayInMonth = new Date(y, m, 0).getDate();
+    const day = Math.min(bill.due_day || 1, maxDayInMonth);
+    const credit = isCreditEntry(bill);
+    const divisor =
+      mode === 'prorated'
+        ? bill.cadence === 'annual'
+          ? 12
+          : bill.cadence === 'quarterly'
+          ? 3
+          : 1
+        : 1;
+    const postAmount = Number((Math.abs(toNumber(bill.amount)) / divisor).toFixed(2));
+    const suffix =
+      divisor === 12 ? ' (Annual ÷ 12)' : divisor === 3 ? ' (Quarterly ÷ 3)' : '';
+    const cadenceTag = bill.cadence || 'monthly';
+    const noteShare = divisor > 1 ? `÷${divisor} monthly share` : 'full';
+
+    return {
+      owner_profile: bill.owner_profile || 'primary',
+      entry_type: credit ? 'credit' : 'expense',
+      expense_date: `${selectedMonth}-${String(day).padStart(2, '0')}`,
+      merchant: `${bill.name}${suffix}`,
+      category: bill.category,
+      amount: postAmount,
+      payment_account_id: bill.payment_account_id || null,
+      recurring_bill_id: bill.id,
+      is_essential: bill.is_essential,
+      notes: `Recurring ${cadenceTag} ${credit ? 'credit' : 'bill'} (${noteShare})`,
+    };
+  };
+
   const handlePostDueBills = async () => {
     if (metrics.unpostedMonthlyBills.length === 0) return;
     setPostingBills(true);
     try {
-      const [y, m] = selectedMonth.split('-').map(Number);
-      const maxDayInMonth = new Date(y, m, 0).getDate();
-
-      const rows = metrics.unpostedMonthlyBills.map((b) => {
-        const day = Math.min(b.due_day || 1, maxDayInMonth);
-        const credit = isCreditEntry(b);
-        return {
-          owner_profile: b.owner_profile || 'primary',
-          entry_type: credit ? 'credit' : 'expense',
-          expense_date: `${selectedMonth}-${String(day).padStart(2, '0')}`,
-          merchant: b.name,
-          category: b.category,
-          amount: toNumber(b.amount),
-          payment_account_id: b.payment_account_id || null,
-          recurring_bill_id: b.id,
-          is_essential: b.is_essential,
-          notes: credit ? 'Recurring credit posted' : 'Recurring bill posted',
-        };
-      });
-
+      const rows = metrics.unpostedMonthlyBills.map((b) => buildExpenseRowFromBill(b, 'full'));
       const { error } = await supabase.from('expenses').insert(rows);
       if (error) throw error;
       await onDataChanged();
     } finally {
       setPostingBills(false);
+    }
+  };
+
+  const handlePostProratedPeriodicBills = async () => {
+    if (metrics.unpostedPeriodicBills.length === 0) return;
+    setPostingBills(true);
+    try {
+      const rows = metrics.unpostedPeriodicBills.map((b) =>
+        buildExpenseRowFromBill(b, 'prorated')
+      );
+      const { error } = await supabase.from('expenses').insert(rows);
+      if (error) throw error;
+      await onDataChanged();
+    } finally {
+      setPostingBills(false);
+    }
+  };
+
+  const handlePostSingleBill = async (bill, mode = 'full') => {
+    setPostingBillId(bill.id);
+    try {
+      const row = buildExpenseRowFromBill(bill, mode);
+      const { error } = await supabase.from('expenses').insert([row]);
+      if (error) throw error;
+      await onDataChanged();
+    } finally {
+      setPostingBillId(null);
     }
   };
 
@@ -460,9 +510,31 @@ export default function ExpensesTab({
               <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
               {postingBills
                 ? 'Posting…'
+                : metrics.unpostedPeriodicBills.length > 0
+                ? `Post ${metrics.unpostedMonthlyBills.length} Monthly Bill${
+                    metrics.unpostedMonthlyBills.length > 1 ? 's' : ''
+                  }`
                 : `Post ${metrics.unpostedMonthlyBills.length} Recurring Bill${
                     metrics.unpostedMonthlyBills.length > 1 ? 's' : ''
                   }`}
+            </button>
+          )}
+          {metrics.unpostedPeriodicBills.length > 0 && (
+            <button
+              type="button"
+              disabled={postingBills}
+              onClick={handlePostProratedPeriodicBills}
+              title={`Post 1-month prorated sinking-fund share into ${formatMonthLabel(selectedMonth)}`}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/15 px-3 py-2 text-xs font-medium text-sky-200 hover:bg-sky-500/25 disabled:opacity-50"
+            >
+              <CheckCircle2 className="h-3.5 w-3.5 text-sky-400" />
+              {postingBills
+                ? 'Posting…'
+                : metrics.unpostedPeriodicBills.every((b) => b.cadence === 'annual')
+                ? `Post ${metrics.unpostedPeriodicBills.length} Annual (÷12)`
+                : metrics.unpostedPeriodicBills.every((b) => b.cadence === 'quarterly')
+                ? `Post ${metrics.unpostedPeriodicBills.length} Quarterly (÷3)`
+                : `Post ${metrics.unpostedPeriodicBills.length} Annual/Qtr (Prorated)`}
             </button>
           )}
           <button
@@ -1265,10 +1337,15 @@ export default function ExpensesTab({
                 const ownerKey = b.owner_profile || 'primary';
                 const ownerBadge = OWNER_PROFILES[ownerKey] || OWNER_PROFILES.primary;
                 const credit = isCreditEntry(b);
+                const isPosted = metrics.postedBillIds.has(b.id);
+                const isPeriodic = b.cadence === 'annual' || b.cadence === 'quarterly';
+                const divisor = b.cadence === 'annual' ? 12 : b.cadence === 'quarterly' ? 3 : 1;
+                const monthlyEquiv = Math.abs(toNumber(b.amount)) / divisor;
+                const rowBusy = postingBillId === b.id || postingBills;
                 return (
-                <div key={b.id} className="flex items-center justify-between py-3 text-xs">
+                <div key={b.id} className="flex flex-wrap items-center justify-between gap-2 py-3 text-xs">
                   <div>
-                    <div className="flex items-center gap-2 font-medium text-zinc-200">
+                    <div className="flex flex-wrap items-center gap-2 font-medium text-zinc-200">
                       <span>{b.name}</span>
                       <span className={`rounded border px-1.5 py-0.5 text-[10px] font-normal ${ownerBadge.badgeClass}`}>
                         {getOwnerDisplayName(ownerKey, householdNames)}
@@ -1278,12 +1355,52 @@ export default function ExpensesTab({
                           Money Back
                         </span>
                       )}
+                      {isPosted && (
+                        <span className="rounded border border-emerald-500/30 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-normal text-emerald-300">
+                          Posted in {formatMonthLabel(selectedMonth)}
+                        </span>
+                      )}
                     </div>
-                    <div className="text-[11px] text-zinc-500">
+                    <div className="text-[11px] text-zinc-500 tabular-nums">
                       {b.category} • {b.cadence} {b.due_day ? `• Due ${ordinalDay(b.due_day)}` : ''}
+                      {isPeriodic && ` • ≈ ${mask(formatCurrency(monthlyEquiv))}/mo`}
                     </div>
                   </div>
-                  <div className="flex items-center gap-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {!isPosted && b.is_active && (
+                      isPeriodic ? (
+                        <>
+                          <button
+                            type="button"
+                            disabled={rowBusy}
+                            onClick={() => handlePostSingleBill(b, 'prorated')}
+                            title={`Post monthly share (÷${divisor}) to ${formatMonthLabel(selectedMonth)}`}
+                            className="rounded-md border border-sky-500/35 bg-sky-500/15 px-2 py-1 text-[10px] font-medium text-sky-200 hover:bg-sky-500/25 disabled:opacity-50"
+                          >
+                            {postingBillId === b.id ? 'Posting…' : `Post ÷${divisor}`}
+                          </button>
+                          <button
+                            type="button"
+                            disabled={rowBusy}
+                            onClick={() => handlePostSingleBill(b, 'full')}
+                            title={`Post full ${b.cadence} amount to ${formatMonthLabel(selectedMonth)}`}
+                            className="rounded-md border border-emerald-500/35 bg-emerald-500/15 px-2 py-1 text-[10px] font-medium text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-50"
+                          >
+                            {postingBillId === b.id ? 'Posting…' : 'Post Full'}
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={rowBusy}
+                          onClick={() => handlePostSingleBill(b, 'full')}
+                          title={`Post to ${formatMonthLabel(selectedMonth)}`}
+                          className="rounded-md border border-emerald-500/35 bg-emerald-500/15 px-2 py-1 text-[10px] font-medium text-emerald-200 hover:bg-emerald-500/25 disabled:opacity-50"
+                        >
+                          {postingBillId === b.id ? 'Posting…' : 'Post'}
+                        </button>
+                      )
+                    )}
                     <span
                       className={`font-mono font-semibold tabular-nums ${
                         credit ? 'text-emerald-300' : 'text-zinc-100'
