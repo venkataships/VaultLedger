@@ -1449,6 +1449,7 @@ export default function PaystubProfileCard({
       {isExpanded && (
         <div className={standalone ? 'rounded-xl border border-zinc-800/90 bg-zinc-950/80' : ''}>
           <form
+            noValidate
             onSubmit={handleSaveProfile}
             className={`space-y-4 p-5 text-xs ${standalone ? '' : 'border-t border-zinc-800/80'}`}
           >

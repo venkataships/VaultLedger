@@ -357,7 +357,7 @@ export function buildActionableInsights({
     });
   } else if (paySummary.deductions.hasItemizedInputs) {
     const magiHeadroomToSaltPhaseout =
-      paySummary.deductions.saltPhaseoutThreshold - paySummary.fedTax.estimatedAgi;
+      paySummary.deductions.saltPhaseoutThreshold - paySummary.fedTax.agiEstimate;
     actions.push({
       id: 'obbba-salt-status',
       priority: paySummary.deductions.inSaltPhaseoutZone ? 'high' : 'on_track',
@@ -370,8 +370,8 @@ export function buildActionableInsights({
         : 'Using Standard Ded.',
       impactUsd: 0,
       summary: paySummary.deductions.inSaltPhaseoutZone
-        ? `Est. MAGI (${formatCurrency(paySummary.fedTax.estimatedAgi, { decimals: 0 })}) exceeds $${paySummary.deductions.saltPhaseoutThreshold.toLocaleString()} — every $1 of extra Pre-Tax 401(k)/HSA saves both marginal tax AND restores 30¢ of SALT deduction!`
-        : `Est. AGI (${formatCurrency(paySummary.fedTax.estimatedAgi, { decimals: 0 })}) sits ${formatCurrency(Math.max(0, magiHeadroomToSaltPhaseout), { decimals: 0 })} below the $505,000 OBBBA SALT phaseout threshold, unlocking the full ${formatCurrency(paySummary.deductions.saltEffectiveCap, { decimals: 0 })} SALT cap.`,
+        ? `Est. MAGI (${formatCurrency(paySummary.fedTax.agiEstimate, { decimals: 0 })}) exceeds $${paySummary.deductions.saltPhaseoutThreshold.toLocaleString()} — every $1 of extra Pre-Tax 401(k)/HSA saves both marginal tax AND restores 30¢ of SALT deduction!`
+        : `Est. AGI (${formatCurrency(paySummary.fedTax.agiEstimate, { decimals: 0 })}) sits ${formatCurrency(Math.max(0, magiHeadroomToSaltPhaseout), { decimals: 0 })} below the $505,000 OBBBA SALT phaseout threshold, unlocking the full ${formatCurrency(paySummary.deductions.saltEffectiveCap, { decimals: 0 })} SALT cap.`,
       steps: [
         `Itemized deduction (${formatCurrency(paySummary.deductions.totalItemized, { decimals: 0 })}) beats Standard (${formatCurrency(paySummary.deductions.standardDeduction, { decimals: 0 })}) by ${formatCurrency(paySummary.deductions.excessOverStandard, { decimals: 0 })} — compare directly against W-4 Step 4(b) (${formatCurrency(paySummary.safeHarbor.combinedW4Deductions, { decimals: 0 })}).`,
         String(taxProfile?.state_code || '').toUpperCase() === 'NY' && paySummary.safeHarbor.maxStateAllowances >= 8
@@ -419,7 +419,7 @@ export function buildActionableInsights({
       paySummary.lifeEvents.leaveIncomeDip +
       baselineMonthlyBurn * 3;
     const cashSurplusAfterBabyAndPromos = liquidBankCash - totalPromoBalance - targetBabyCash;
-    const ctcHeadroom = IRS_2026_LIMITS.ctcPhaseoutMfj - paySummary.fedTax.estimatedAgi;
+    const ctcHeadroom = IRS_2026_LIMITS.ctcPhaseoutMfj - paySummary.fedTax.agiEstimate;
 
     actions.push({
       id: 'baby-2027-playbook',
@@ -436,7 +436,7 @@ export function buildActionableInsights({
         'Jan 1 Paycheck Dip: Social Security (6.2%) + NY PFL ($411.91 each) reset Jan 1, reducing combined net take-home by ~$850–$1,000/mo right as delivery arrives — keep extra cash liquid in HYSA.',
         '30-Day QLE Window after birth: Add baby to optimal health plan, elect Dependent Care FSA ($7,500 MFJ tax-free), and resolve the Healthcare FSA vs. Family HSA ($8,750) choice cleanly.',
         'Claim the $1,000 OBBBA Section 530A newborn "Trump Account" federal seed (IRS Form 4547) and open/fund a NY 529 (up to $10,000/yr MFJ NY state tax deduction — saves ~$600/yr in NY tax!).',
-        `Tax-Year Timing: Your est. AGI (${formatCurrency(paySummary.fedTax.estimatedAgi, { decimals: 0 })}) is ${ctcHeadroom >= 0 ? `${formatCurrency(ctcHeadroom, { decimals: 0 })} below` : 'above'} the $400,000 MFJ Child Tax Credit ($2,200) phaseout. (Born Dec 31 = 2026 credit; Jan 1+ = starts 2027.)`,
+        `Tax-Year Timing: Your est. AGI (${formatCurrency(paySummary.fedTax.agiEstimate, { decimals: 0 })}) is ${ctcHeadroom >= 0 ? `${formatCurrency(ctcHeadroom, { decimals: 0 })} below` : 'above'} the $400,000 MFJ Child Tax Credit ($2,200) phaseout. (Born Dec 31 = 2026 credit; Jan 1+ = starts 2027.)`,
       ],
       navAction: { label: 'Open Life Events', tab: 'income' },
       aiPrompt: `Build a month-by-month cash flow, benefits QLE, and tax checklist from now through June 2027 for our baby due ${paySummary.lifeEvents.dueMonth || 'Jan 2027'} — covering two-plan-year medical OOP max, Jan 1 Social Security/NY PFL reset, NY PFL + accrued PTO/sick leave, Family HSA vs FSA, $7,500 DCFSA, NY 529 $10k deduction, and $1,000 Form 4547 newborn seed.`,
@@ -782,7 +782,7 @@ export default function ActionableInsightsDashboard({
           </div>
           <div className="mt-1 text-[10px] text-zinc-400 tabular-nums">
             {paySummary.combinedGrossComp > 0
-              ? `Est. AGI ${mask(formatCurrency(paySummary.fedTax.estimatedAgi, { decimals: 0 }))} • ${
+              ? `Est. AGI ${mask(formatCurrency(paySummary.fedTax.agiEstimate, { decimals: 0 }))} • ${
                   paySummary.fedTax.usingItemized
                     ? `Itemized ${mask(formatCurrency(paySummary.fedTax.appliedDeduction, { decimals: 0 }))}`
                     : 'Standard Ded.'
