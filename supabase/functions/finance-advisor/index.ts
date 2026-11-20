@@ -690,6 +690,49 @@ function buildPaystubSnapshot(
   const expectingChild = Boolean(tp.expecting_child);
   const dueMonth = String(tp.expected_child_due_month || '').trim();
 
+  const rawAutoSync = (rawDetails?.payroll_autosync as Record<string, unknown>) || {};
+  const autoSyncRules = Array.isArray(rawAutoSync.rules)
+    ? (rawAutoSync.rules as Array<Record<string, unknown>>)
+        .filter((r) => r && r.enabled !== false)
+        .map((r) =>
+          compactObj({
+            type: r.type,
+            owner: r.owner === 'spouse' ? spouseName : primaryName,
+            label: r.label,
+            pay_frequency: r.pay_frequency,
+            start_date: r.start_date,
+            last_synced_date: r.last_synced_date || undefined,
+            ...(r.type === 'espp'
+              ? {
+                  symbol: r.symbol || undefined,
+                  amount_mode: r.amount_mode || undefined,
+                  espp_per_check: r2(Math.max(0, num(r.espp_per_check))),
+                  espp_pct_of_base: r2(Math.max(0, num(r.espp_pct_of_base))),
+                  discount_pct: num(r.discount_pct),
+                  has_lookback: Boolean(r.has_lookback),
+                  in_flight_accrued_cash_usd: r2(Math.max(0, num(r.accrued_cash))),
+                  purchase_dates_mm_dd: Array.isArray(r.purchase_months_days)
+                    ? r.purchase_months_days
+                    : undefined,
+                }
+              : {
+                  amount_mode: r.amount_mode || undefined,
+                  employee_per_check: r2(Math.max(0, num(r.employee_per_check))),
+                  employee_pct_of_base: r2(Math.max(0, num(r.employee_pct_of_base))),
+                  employer_match_per_check: r2(Math.max(0, num(r.employer_match_per_check))),
+                  after_tax_per_check: r2(Math.max(0, num(r.after_tax_per_check))),
+                  annual_employee_cap: r2(Math.max(0, num(r.annual_employee_cap))),
+                  target_allocations: Array.isArray(r.allocations) && r.allocations.length > 0
+                    ? (r.allocations as Array<Record<string, unknown>>)
+                        .filter((a) => a.symbol && num(a.pct) > 0)
+                        .map((a) => `${String(a.symbol).toUpperCase()} ${num(a.pct)}%`)
+                    : undefined,
+                }),
+          })
+        )
+        .filter(Boolean)
+    : [];
+
   return compactObj({
     filing_status: filingStatus,
     state_code: stateCode || 'Not specified',
@@ -800,6 +843,7 @@ function buildPaystubSnapshot(
     }),
     primary_pay_and_paystub: p.json,
     spouse_pay_and_paystub: s.json,
+    payroll_autosync_schedules: autoSyncRules.length > 0 ? autoSyncRules : undefined,
     paystub_alerts: alerts.length > 0 ? alerts : undefined,
   });
 }

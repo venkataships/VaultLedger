@@ -1,3 +1,5 @@
+import { normalizePayrollAutoSync, sanitizePayrollAutoSyncForDb } from './payrollSync.js';
+
 export const ACCOUNT_CATEGORIES = {
   retirement_401k: {
     key: 'retirement_401k',
@@ -1076,6 +1078,7 @@ export function normalizePaystubDetails(raw) {
     primary: normalizeOnePersonPaystub(src.primary),
     spouse: normalizeOnePersonPaystub(src.spouse),
     tax_planning: normalizeTaxPlanning(src.tax_planning),
+    payroll_autosync: normalizePayrollAutoSync(src.payroll_autosync),
   };
 }
 
@@ -1148,6 +1151,7 @@ export function sanitizePaystubDetailsForDb(raw) {
     primary: cleanPerson(norm.primary),
     spouse: cleanPerson(norm.spouse),
     tax_planning: cleanTaxPlanning,
+    payroll_autosync: sanitizePayrollAutoSyncForDb(norm.payroll_autosync),
   };
 }
 

@@ -6,6 +6,7 @@ import {
   Baby,
   Briefcase,
   Calculator,
+  CalendarClock,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -30,6 +31,8 @@ import {
   sanitizePaystubDetailsForDb,
   toNumber,
 } from '../lib/finance';
+import { computePendingPayrollBatch } from '../lib/payrollSync';
+import PayrollAutoSyncPanel from './PayrollAutoSyncPanel';
 
 function buildInitialForm(taxProfile) {
   return {
@@ -1148,18 +1151,22 @@ export default function PaystubProfileCard({
   session,
   taxProfile,
   budgets,
+  accounts = [],
+  equityHoldings = [],
   householdNames,
   ccEligibleLots = [],
   privacyMode,
   onTaxProfileSaved,
   standalone = false,
   onOpenAdvisor,
+  initialSubTab = null,
+  onConsumedInitialSubTab,
 }) {
   const [profileOpen, setProfileOpen] = useState(
     !taxProfile ||
       (toNumber(taxProfile.primary_base_salary) === 0 && toNumber(taxProfile.spouse_base_salary) === 0)
   );
-  const [activeSubTab, setActiveSubTab] = useState('household'); // 'household' | 'primary' | 'spouse'
+  const [activeSubTab, setActiveSubTab] = useState(initialSubTab || 'household'); // 'household' | 'tax_planning' | 'primary' | 'spouse' | 'autosync'
   const [profileForm, setProfileForm] = useState(() => buildInitialForm(taxProfile));
   const [isDirty, setIsDirty] = useState(false);
   const lastProfileVersionRef = useRef(taxProfile?.updated_at || null);
@@ -1167,6 +1174,13 @@ export default function PaystubProfileCard({
   const [syncingTakeHome, setSyncingTakeHome] = useState(false);
   const [profileNotice, setProfileNotice] = useState('');
   const [profileError, setProfileError] = useState('');
+
+  useEffect(() => {
+    if (initialSubTab) {
+      setActiveSubTab(initialSubTab);
+      if (onConsumedInitialSubTab) onConsumedInitialSubTab();
+    }
+  }, [initialSubTab, onConsumedInitialSubTab]);
 
   useEffect(() => {
     if (!taxProfile) return;
@@ -1184,6 +1198,16 @@ export default function PaystubProfileCard({
     () => computeHouseholdPaystubSummary(profileForm, householdNames),
     [profileForm, householdNames]
   );
+
+  const autoSyncStats = useMemo(() => {
+    const syncState = profileForm.paystub_details?.payroll_autosync || { rules: [] };
+    const enabledCount = (syncState.rules || []).filter((r) => r.enabled).length;
+    const pending = computePendingPayrollBatch(syncState, profileForm, accounts);
+    return {
+      enabledCount,
+      dueCount: pending.dueItems.length + pending.dueEsppPurchases.length,
+    };
+  }, [profileForm, accounts]);
 
   const syncedTakeHome = useMemo(() => {
     const row = (budgets || []).find((b) => b.category === '_monthly_take_home');
@@ -1481,6 +1505,25 @@ export default function PaystubProfileCard({
               >
                 <Calculator className="h-3.5 w-3.5" />
                 {householdNames.spouse_name} Paystub
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSubTab('autosync')}
+                className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-medium transition ${
+                  activeSubTab === 'autosync'
+                    ? 'bg-cyan-500/20 text-cyan-200 ring-1 ring-cyan-500/40'
+                    : 'text-zinc-400 hover:text-zinc-200'
+                }`}
+              >
+                <CalendarClock className="h-3.5 w-3.5" />
+                Auto-Sync (401k / ESPP)
+                {autoSyncStats.dueCount > 0 ? (
+                  <span className="rounded-full bg-amber-400 px-1.5 py-0.2 font-mono text-[9px] font-bold text-zinc-950">
+                    {autoSyncStats.dueCount}
+                  </span>
+                ) : autoSyncStats.enabledCount > 0 ? (
+                  <span className="h-1.5 w-1.5 rounded-full bg-cyan-400" />
+                ) : null}
               </button>
             </div>
 
@@ -2049,6 +2092,24 @@ export default function PaystubProfileCard({
               setIsDirty={setIsDirty}
               personStats={summary.spouse}
               mask={mask}
+            />
+          )}
+
+          {/* SUB-TAB 5: PAYROLL AUTO-SYNC (401K / ESPP) */}
+          {activeSubTab === 'autosync' && (
+            <PayrollAutoSyncPanel
+              supabase={supabase}
+              session={session}
+              taxProfile={taxProfile}
+              profileForm={profileForm}
+              setProfileForm={setProfileForm}
+              setIsDirty={setIsDirty}
+              isDirty={isDirty}
+              accounts={accounts}
+              equityHoldings={equityHoldings}
+              householdNames={householdNames}
+              mask={mask}
+              onDataChanged={onTaxProfileSaved}
             />
           )}
 

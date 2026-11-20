@@ -16,16 +16,23 @@ import {
   Check,
   Sparkles,
   Briefcase,
+  CalendarClock,
 } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import { seedDemoVaultData } from './lib/demoSeed';
 import {
   computeRealAssetLiveBalance,
   filterByHouseholdScope,
+  formatCurrency,
   getRealAssetType,
   todayIsoDate,
   toNumber,
 } from './lib/finance';
+import {
+  computePendingPayrollBatch,
+  executePayrollSyncBatch,
+  formatShortDate,
+} from './lib/payrollSync';
 import {
   isPersistedScreenLocked,
   loadLockSettings,
@@ -161,6 +168,11 @@ function AuthenticatedVault({
   // Shared cross-tab modals
   const [batchModalOpen, setBatchModalOpen] = useState(false);
   const [newAccountCategory, setNewAccountCategory] = useState(null);
+  const [payTabInitialSubTab, setPayTabInitialSubTab] = useState(null);
+  const [postingTopBannerSync, setPostingTopBannerSync] = useState(false);
+  const [topSyncBannerNotice, setTopSyncBannerNotice] = useState('');
+  const [topSyncBannerError, setTopSyncBannerError] = useState('');
+  const [dismissedSyncBanner, setDismissedSyncBanner] = useState(false);
 
   // Vault Data
   const [accounts, setAccounts] = useState([]);
@@ -496,6 +508,47 @@ function AuthenticatedVault({
     [accounts, expenses]
   );
 
+  const pendingPayrollBatch = useMemo(
+    () =>
+      computePendingPayrollBatch(
+        taxProfile?.paystub_details?.payroll_autosync,
+        taxProfile,
+        accounts
+      ),
+    [taxProfile, accounts]
+  );
+
+  const handleOpenAutoSyncReview = useCallback(() => {
+    setPayTabInitialSubTab('autosync');
+    setActiveTab('income');
+  }, []);
+
+  const handleQuickPostAllDuePayroll = useCallback(async () => {
+    if (!pendingPayrollBatch.dueItems.length || !session?.user?.id) return;
+    setPostingTopBannerSync(true);
+    setTopSyncBannerError('');
+    setTopSyncBannerNotice('');
+    try {
+      const res = await executePayrollSyncBatch({
+        supabase,
+        userId: session.user.id,
+        taxProfile,
+        dueItems: pendingPayrollBatch.dueItems,
+      });
+      const warnText = res.warnings.length > 0 ? ` (${res.warnings.join(' ')})` : '';
+      setTopSyncBannerNotice(
+        `Posted ${res.postedCount} payroll contribution${res.postedCount === 1 ? '' : 's'} (+${formatCurrency(
+          res.totalPostedDollars
+        )}) to your accounts.${warnText}`
+      );
+      await loadAllData();
+    } catch (err) {
+      setTopSyncBannerError(err?.message || 'Failed to apply payroll auto-sync.');
+    } finally {
+      setPostingTopBannerSync(false);
+    }
+  }, [pendingPayrollBatch.dueItems, session?.user?.id, taxProfile, loadAllData]);
+
   const handleNavigateTab = (tab, categoryFilter) => {
     if (categoryFilter) setAccountCategoryFilter(categoryFilter);
     setActiveTab(tab);
@@ -772,6 +825,107 @@ function AuthenticatedVault({
           </div>
         )}
 
+        {topSyncBannerError && (
+          <div className="mb-4 flex items-center justify-between gap-2 rounded-xl border border-rose-500/35 bg-rose-500/10 px-4 py-2.5 text-xs text-rose-200">
+            <span>{topSyncBannerError}</span>
+            <button
+              type="button"
+              onClick={() => setTopSyncBannerError('')}
+              className="text-rose-300 hover:text-rose-100"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+
+        {topSyncBannerNotice && (
+          <div className="mb-4 flex items-center justify-between gap-2 rounded-xl border border-emerald-500/35 bg-emerald-500/10 px-4 py-2.5 text-xs text-emerald-200">
+            <span>{topSyncBannerNotice}</span>
+            <button
+              type="button"
+              onClick={() => setTopSyncBannerNotice('')}
+              className="text-emerald-300 hover:text-emerald-100"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+
+        {!loadingData &&
+          !dismissedSyncBanner &&
+          pendingPayrollBatch.hasDueActions &&
+          activeTab !== 'security' && (
+            <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/35 bg-amber-500/10 px-4 py-3 text-xs">
+              <div className="flex items-start gap-2.5">
+                <CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+                <div>
+                  <div className="font-semibold text-amber-200">
+                    Payroll Auto-Sync Ready:{' '}
+                    {pendingPayrollBatch.dueItems.length > 0 && (
+                      <span>
+                        {pendingPayrollBatch.totalDuePaydays} due pay period
+                        {pendingPayrollBatch.totalDuePaydays === 1 ? '' : 's'} (
+                        {privacyMode
+                          ? '••••••'
+                          : `+${formatCurrency(pendingPayrollBatch.totalDueDollars, { decimals: 0 })}`}
+                        )
+                      </span>
+                    )}
+                    {pendingPayrollBatch.dueItems.length > 0 &&
+                      pendingPayrollBatch.dueEsppPurchases.length > 0 &&
+                      ' • '}
+                    {pendingPayrollBatch.dueEsppPurchases.length > 0 && (
+                      <span>
+                        {pendingPayrollBatch.dueEsppPurchases.length} ESPP purchase ready
+                      </span>
+                    )}
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-amber-100/80">
+                    {pendingPayrollBatch.dueItems
+                      .map(
+                        (it) =>
+                          `${it.rule.label}: ${
+                            privacyMode
+                              ? '••••'
+                              : `+${formatCurrency(it.totalAmount, { decimals: 0 })}`
+                          } (${it.paydates.map(formatShortDate).join(', ')})`
+                      )
+                      .join(' • ')}
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {pendingPayrollBatch.dueItems.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={postingTopBannerSync}
+                    onClick={handleQuickPostAllDuePayroll}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-amber-400 px-3 py-1.5 text-xs font-semibold text-zinc-950 hover:bg-amber-300 disabled:opacity-50"
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                    {postingTopBannerSync ? 'Posting…' : 'Apply All Now'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleOpenAutoSyncReview}
+                  className="rounded-lg border border-amber-400/40 bg-amber-500/15 px-3 py-1.5 text-xs font-medium text-amber-100 hover:bg-amber-500/25"
+                >
+                  Review / Adjust
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDismissedSyncBanner(true)}
+                  title="Dismiss for this session"
+                  className="rounded-lg p-1 text-amber-300/70 hover:text-amber-100"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+          )}
+
         {loadingData ? (
           <div className="flex items-center justify-center py-24 text-xs text-zinc-500">
             <div className="mr-2.5 h-4 w-4 animate-spin rounded-full border-2 border-zinc-700 border-t-emerald-400" />
@@ -833,10 +987,14 @@ function AuthenticatedVault({
                 session={session}
                 taxProfile={taxProfile}
                 budgets={budgets}
+                accounts={accounts}
+                equityHoldings={equityHoldings}
                 householdNames={householdNames}
                 privacyMode={privacyMode}
                 onTaxProfileSaved={() => loadAllData()}
                 onOpenAdvisor={() => setActiveTab('advisor')}
+                initialSubTab={payTabInitialSubTab}
+                onConsumedInitialSubTab={() => setPayTabInitialSubTab(null)}
               />
             )}
 
