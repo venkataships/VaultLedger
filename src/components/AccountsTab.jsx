@@ -39,6 +39,7 @@ import {
   estimateLoanPayoff,
   formatCurrency,
   formatInrDisplay,
+  formatLastSaved,
   formatPercent,
   formatShortDate,
   getOwnerDisplayName,
@@ -160,6 +161,7 @@ export default function AccountsTab({
   // Stock / RSU Holdings Modal state
   const [holdingsAccount, setHoldingsAccount] = useState(null);
   const [holdingCashInput, setHoldingCashInput] = useState('0');
+  const [cashSavedAt, setCashSavedAt] = useState(null);
   const [newSymbol, setNewSymbol] = useState('');
   const [newHoldingType, setNewHoldingType] = useState('rsu');
   const [newVestedShares, setNewVestedShares] = useState('');
@@ -879,6 +881,7 @@ export default function AccountsTab({
   const openHoldingsModal = (acc) => {
     setHoldingsAccount(acc);
     setHoldingCashInput(String(toNumber(acc.cash_balance)));
+    setCashSavedAt(acc.last_updated_at || null);
     setHoldingError('');
     setHoldingNotice('');
     setNewSymbol('');
@@ -899,6 +902,11 @@ export default function AccountsTab({
       const cashVal = Number(parseFloat(holdingCashInput || '0').toFixed(2)) || 0;
       await recomputeAccountBalanceFromHoldings(holdingsAccount.id, cashVal);
       await onDataChanged();
+      const savedAtIso = new Date().toISOString();
+      setCashSavedAt(savedAtIso);
+      setHoldingNotice(
+        `Uninvested cash sweep saved (${formatCurrency(cashVal)}) • ${formatLastSaved(savedAtIso)}.`
+      );
     } catch (err) {
       setHoldingError(err?.message || 'Failed to save cash sweep balance.');
     } finally {
@@ -2953,37 +2961,70 @@ export default function AccountsTab({
             )}
 
             {/* Uninvested Cash Sweep + Live Refresh */}
-            <div className="mb-5 flex flex-wrap items-end justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 text-xs">
-              <div className="flex items-end gap-2">
-                <label className="block text-zinc-300">
-                  Uninvested Cash Sweep ($)
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={holdingCashInput}
-                    onChange={(e) => setHoldingCashInput(e.target.value)}
-                    className="mt-1 block w-40 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 font-mono text-sm text-zinc-100"
-                  />
-                </label>
-                <button
-                  type="button"
-                  disabled={savingHolding}
-                  onClick={handleSaveHoldingCash}
-                  className="rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 font-medium text-zinc-200 hover:bg-zinc-700"
-                >
-                  Save Cash
-                </button>
-              </div>
+            {(() => {
+              const parsedCashInput = Number(parseFloat(holdingCashInput || '0').toFixed(2)) || 0;
+              const cashDirty =
+                Math.abs(parsedCashInput - toNumber(holdingsAccount.cash_balance)) >= 0.01;
+              const displayCashSavedAt = cashSavedAt || holdingsAccount.last_updated_at || null;
+              return (
+                <div className="mb-5 flex flex-wrap items-end justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 p-3.5 text-xs">
+                  <div className="flex flex-wrap items-end gap-2.5">
+                    <label className="block text-zinc-300">
+                      Uninvested Cash Sweep ($)
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={holdingCashInput}
+                        onChange={(e) => setHoldingCashInput(e.target.value)}
+                        className="mt-1 block w-40 rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 font-mono text-sm text-zinc-100"
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      disabled={savingHolding}
+                      onClick={handleSaveHoldingCash}
+                      className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 font-medium transition disabled:opacity-50 ${
+                        savingHolding || cashDirty
+                          ? 'bg-emerald-500 font-semibold text-zinc-950 hover:bg-emerald-400'
+                          : 'border border-emerald-500/40 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25'
+                      }`}
+                    >
+                      {savingHolding ? (
+                        'Saving…'
+                      ) : cashDirty ? (
+                        'Save Cash'
+                      ) : (
+                        <>
+                          <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                          Saved
+                        </>
+                      )}
+                    </button>
+                    {cashDirty ? (
+                      <span className="pb-2 text-[11px] font-medium text-amber-300">
+                        Unsaved change
+                      </span>
+                    ) : displayCashSavedAt ? (
+                      <span
+                        title={`Last saved ${new Date(displayCashSavedAt).toLocaleString()}`}
+                        className="pb-2 text-[11px] text-zinc-400"
+                      >
+                        Last saved: {formatLastSaved(displayCashSavedAt)}
+                      </span>
+                    ) : null}
+                  </div>
 
-              <button
-                type="button"
-                onClick={onRefreshQuotes}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-500/15 px-3 py-2 font-medium text-sky-200 hover:bg-sky-500/25"
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-                Refresh Live Prices Now
-              </button>
-            </div>
+                  <button
+                    type="button"
+                    onClick={onRefreshQuotes}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/30 bg-sky-500/15 px-3 py-2 font-medium text-sky-200 hover:bg-sky-500/25"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Refresh Live Prices Now
+                  </button>
+                </div>
+              );
+            })()}
 
             {/* Add New Ticker Form */}
             <form onSubmit={handleAddHolding} className="mb-5 space-y-2 text-xs">

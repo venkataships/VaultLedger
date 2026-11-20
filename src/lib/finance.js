@@ -213,6 +213,31 @@ export function formatShortDate(isoDate) {
   return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: '2-digit' });
 }
 
+export function formatLastSaved(isoTimestamp) {
+  if (!isoTimestamp) return '';
+  const dt = new Date(isoTimestamp);
+  if (Number.isNaN(dt.getTime())) return '';
+  const now = new Date();
+  const sameDay =
+    dt.getFullYear() === now.getFullYear() &&
+    dt.getMonth() === now.getMonth() &&
+    dt.getDate() === now.getDate();
+  const timeStr = dt.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+  });
+  if (sameDay) {
+    return `Today, ${timeStr}`;
+  }
+  const sameYear = dt.getFullYear() === now.getFullYear();
+  const dateStr = dt.toLocaleDateString([], {
+    month: 'short',
+    day: 'numeric',
+    ...(sameYear ? {} : { year: 'numeric' }),
+  });
+  return `${dateStr}, ${timeStr}`;
+}
+
 export function ordinalDay(day) {
   const n = Number(day);
   if (!n) return '';

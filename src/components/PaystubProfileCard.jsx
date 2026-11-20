@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock,
   FileText,
   Home,
   Info,
@@ -26,6 +27,7 @@ import {
   PAY_FREQUENCIES,
   computeHouseholdPaystubSummary,
   formatCurrency,
+  formatLastSaved,
   formatPercent,
   getEmployerRestrictedTickers,
   normalizePaystubDetails,
@@ -1171,10 +1173,23 @@ export default function PaystubProfileCard({
   const [profileForm, setProfileForm] = useState(() => buildInitialForm(taxProfile));
   const [isDirty, setIsDirty] = useState(false);
   const lastProfileVersionRef = useRef(taxProfile?.updated_at || null);
+  const [lastSavedAt, setLastSavedAt] = useState(taxProfile?.updated_at || null);
+  const [justSaved, setJustSaved] = useState(false);
+  const justSavedTimerRef = useRef(null);
   const [savingProfile, setSavingProfile] = useState(false);
   const [syncingTakeHome, setSyncingTakeHome] = useState(false);
   const [profileNotice, setProfileNotice] = useState('');
   const [profileError, setProfileError] = useState('');
+
+  useEffect(() => {
+    return () => {
+      if (justSavedTimerRef.current) clearTimeout(justSavedTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isDirty) setJustSaved(false);
+  }, [isDirty]);
 
   useEffect(() => {
     if (initialSubTab) {
@@ -1188,6 +1203,7 @@ export default function PaystubProfileCard({
     const nextVersion = taxProfile.updated_at || null;
     if (nextVersion !== lastProfileVersionRef.current || !isDirty) {
       lastProfileVersionRef.current = nextVersion;
+      if (nextVersion) setLastSavedAt(nextVersion);
       setProfileForm(buildInitialForm(taxProfile));
       setIsDirty(false);
     }
@@ -1215,10 +1231,12 @@ export default function PaystubProfileCard({
     };
   }, [profileForm, accounts]);
 
-  const syncedTakeHome = useMemo(() => {
-    const row = (budgets || []).find((b) => b.category === '_monthly_take_home');
-    return row ? toNumber(row.monthly_limit) : 0;
-  }, [budgets]);
+  const syncedTakeHomeRow = useMemo(
+    () => (budgets || []).find((b) => b.category === '_monthly_take_home') || null,
+    [budgets]
+  );
+
+  const syncedTakeHome = syncedTakeHomeRow ? toNumber(syncedTakeHomeRow.monthly_limit) : 0;
 
   const hasSpouseData =
     summary.spouse.annualCashAndEquityComp > 0 ||
@@ -1239,6 +1257,7 @@ export default function PaystubProfileCard({
 
     try {
       const sanitizedPaystub = sanitizePaystubDetailsForDb(profileForm.paystub_details);
+      const savedAtIso = new Date().toISOString();
       const payload = {
         user_id: session.user.id,
         filing_status: profileForm.filing_status,
@@ -1264,7 +1283,7 @@ export default function PaystubProfileCard({
         risk_tolerance: profileForm.risk_tolerance,
         financial_goals: profileForm.financial_goals.trim().slice(0, 2000),
         paystub_details: sanitizedPaystub,
-        updated_at: new Date().toISOString(),
+        updated_at: savedAtIso,
       };
 
       const { error } = await supabase
@@ -1272,9 +1291,16 @@ export default function PaystubProfileCard({
         .upsert(payload, { onConflict: 'user_id' });
       if (error) throw error;
 
+      lastProfileVersionRef.current = savedAtIso;
+      setLastSavedAt(savedAtIso);
       setIsDirty(false);
+      setJustSaved(true);
+      if (justSavedTimerRef.current) clearTimeout(justSavedTimerRef.current);
+      justSavedTimerRef.current = setTimeout(() => setJustSaved(false), 4000);
       setProfileNotice(
-        'Paystub & Tax Profile saved under AAL2 RLS. Claude CFO will use these exact numbers immediately.'
+        `Paystub & Tax Profile saved (${formatLastSaved(
+          savedAtIso
+        )}) under AAL2 RLS. Claude CFO will use these exact numbers immediately.`
       );
       if (onTaxProfileSaved) await onTaxProfileSaved();
     } catch (err) {
@@ -1390,11 +1416,19 @@ export default function PaystubProfileCard({
         </span>
       )}
 
-      {isDirty && (
+      {isDirty ? (
         <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-200">
           Unsaved edits
         </span>
-      )}
+      ) : lastSavedAt ? (
+        <span
+          title={`Last saved ${new Date(lastSavedAt).toLocaleString()}`}
+          className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300"
+        >
+          <CheckCircle2 className="h-3 w-3 shrink-0" />
+          Last saved: {formatLastSaved(lastSavedAt)}
+        </span>
+      ) : null}
     </>
   );
 
@@ -1708,48 +1742,79 @@ export default function PaystubProfileCard({
                 </div>
 
                 {/* KPI 2: Monthly Net Base + Sync Button */}
-                <div className="rounded-xl border border-zinc-800 bg-zinc-900/45 p-3.5">
-                  <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-400">
-                    <span>Est. Monthly Net Base</span>
-                    <button
-                      type="button"
-                      disabled={
-                        syncingTakeHome ||
-                        !summary.hasAnyTaxWithholding ||
-                        summary.combinedAvgMonthlyNetBase <= 0
-                      }
-                      onClick={handleSyncMonthlyTakeHome}
-                      title={
-                        summary.hasAnyTaxWithholding
-                          ? 'Update _monthly_take_home in the Expenses Tab for accurate Savings Rate'
-                          : 'Enter paycheck tax & deduction numbers on a Paystub tab first'
-                      }
-                      className="inline-flex items-center gap-1 rounded-md border border-sky-500/35 bg-sky-500/15 px-2 py-0.5 text-[10px] font-medium text-sky-200 hover:bg-sky-500/25 disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      <ArrowRightLeft className="h-2.5 w-2.5" />
-                      {syncingTakeHome ? 'Syncing…' : 'Sync to Expenses'}
-                    </button>
-                  </div>
-                  <div className="mt-1 font-mono text-lg font-semibold text-sky-300 tabular-nums">
-                    {summary.hasAnyTaxWithholding
-                      ? mask(formatCurrency(summary.combinedAvgMonthlyNetBase, { decimals: 0 }))
-                      : '—'}
-                    <span className="text-xs font-normal text-zinc-500">/mo</span>
-                  </div>
-                  <div className="mt-1 text-[10px] text-zinc-400 tabular-nums">
-                    {summary.hasAnyTaxWithholding &&
-                    Math.abs(summary.combinedTypicalMonthlyNet - summary.combinedAvgMonthlyNetBase) > 10
-                      ? `2-check mo: ${mask(
-                          formatCurrency(summary.combinedTypicalMonthlyNet, { decimals: 0 })
-                        )} • Expenses: `
-                      : 'Synced in Expenses: '}
-                    <span className="text-zinc-300">
-                      {syncedTakeHome > 0
-                        ? mask(formatCurrency(syncedTakeHome, { decimals: 0 }))
-                        : 'Not set'}
-                    </span>
-                  </div>
-                </div>
+                {(() => {
+                  const isTakeHomeSynced =
+                    syncedTakeHome > 0 &&
+                    Boolean(syncedTakeHomeRow?.updated_at) &&
+                    summary.hasAnyTaxWithholding &&
+                    Math.abs(syncedTakeHome - summary.combinedAvgMonthlyNetBase) < 1;
+                  return (
+                    <div className="rounded-xl border border-zinc-800 bg-zinc-900/45 p-3.5">
+                      <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-400">
+                        <span>Est. Monthly Net Base</span>
+                        <button
+                          type="button"
+                          disabled={
+                            syncingTakeHome ||
+                            !summary.hasAnyTaxWithholding ||
+                            summary.combinedAvgMonthlyNetBase <= 0
+                          }
+                          onClick={handleSyncMonthlyTakeHome}
+                          title={
+                            isTakeHomeSynced
+                              ? `Last synced ${new Date(
+                                  syncedTakeHomeRow.updated_at
+                                ).toLocaleString()}. Click to re-sync.`
+                              : summary.hasAnyTaxWithholding
+                              ? 'Update _monthly_take_home in the Expenses Tab for accurate Savings Rate'
+                              : 'Enter paycheck tax & deduction numbers on a Paystub tab first'
+                          }
+                          className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-medium disabled:cursor-not-allowed disabled:opacity-40 ${
+                            isTakeHomeSynced
+                              ? 'border-emerald-500/35 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25'
+                              : 'border-sky-500/35 bg-sky-500/15 text-sky-200 hover:bg-sky-500/25'
+                          }`}
+                        >
+                          {isTakeHomeSynced ? (
+                            <CheckCircle2 className="h-2.5 w-2.5 text-emerald-400" />
+                          ) : (
+                            <ArrowRightLeft className="h-2.5 w-2.5" />
+                          )}
+                          {syncingTakeHome
+                            ? 'Syncing…'
+                            : isTakeHomeSynced
+                            ? 'Synced'
+                            : 'Sync to Expenses'}
+                        </button>
+                      </div>
+                      <div className="mt-1 font-mono text-lg font-semibold text-sky-300 tabular-nums">
+                        {summary.hasAnyTaxWithholding
+                          ? mask(formatCurrency(summary.combinedAvgMonthlyNetBase, { decimals: 0 }))
+                          : '—'}
+                        <span className="text-xs font-normal text-zinc-500">/mo</span>
+                      </div>
+                      <div className="mt-1 text-[10px] text-zinc-400 tabular-nums">
+                        {summary.hasAnyTaxWithholding &&
+                        Math.abs(summary.combinedTypicalMonthlyNet - summary.combinedAvgMonthlyNetBase) > 10
+                          ? `2-check mo: ${mask(
+                              formatCurrency(summary.combinedTypicalMonthlyNet, { decimals: 0 })
+                            )} • Expenses: `
+                          : 'Synced in Expenses: '}
+                        <span className="text-zinc-300">
+                          {syncedTakeHome > 0
+                            ? mask(formatCurrency(syncedTakeHome, { decimals: 0 }))
+                            : 'Not set'}
+                        </span>
+                        {isTakeHomeSynced && syncedTakeHomeRow?.updated_at && (
+                          <span className="text-zinc-500">
+                            {' '}
+                            • {formatLastSaved(syncedTakeHomeRow.updated_at)}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* KPI 3: Annual Tax-Advantaged + ESPP */}
                 <div className="rounded-xl border border-zinc-800 bg-zinc-900/45 p-3.5">
@@ -2159,38 +2224,104 @@ export default function PaystubProfileCard({
             />
           )}
 
-          {/* Persistent Save Footer across all 4 sub-tabs */}
-          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-[11px]">
-            <div className="flex flex-wrap items-center gap-3 text-zinc-400">
-              <Sparkles className="h-3.5 w-3.5 text-emerald-400" />
-              <span>
-                Claude CFO reads all paychecks, OBBBA SALT/itemized deductions, W-4/state allowances, capital loss carryforwards, 2025 Safe Harbor & life events on every prompt.
-              </span>
-            </div>
+          {/* Persistent Save Footer across all 5 sub-tabs */}
+          <div className="space-y-2">
+            {profileError && (
+              <div className="flex items-center gap-2 rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-[11px] text-rose-200">
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span>{profileError}</span>
+              </div>
+            )}
 
-            <div className="flex items-center gap-2">
-              {isDirty && taxProfile && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-[11px]">
+              <div className="flex flex-wrap items-center gap-2.5 text-zinc-400">
+                <Sparkles className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                <span>
+                  Claude CFO reads all paychecks, OBBBA SALT/itemized deductions, W-4/state allowances, capital loss carryforwards, 2025 Safe Harbor & life events on every prompt.
+                </span>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2.5">
+                {isDirty ? (
+                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/35 bg-amber-500/10 px-2.5 py-1.5 text-[11px] font-medium text-amber-200">
+                    <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+                    Unsaved changes
+                    {lastSavedAt && (
+                      <span className="font-normal text-zinc-400">
+                        • Last saved {formatLastSaved(lastSavedAt)}
+                      </span>
+                    )}
+                  </span>
+                ) : lastSavedAt ? (
+                  <span
+                    title={`Last saved ${new Date(lastSavedAt).toLocaleString()}`}
+                    className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[11px] transition ${
+                      justSaved
+                        ? 'border-emerald-500/50 bg-emerald-500/20 font-medium text-emerald-200'
+                        : 'border-emerald-500/25 bg-emerald-500/10 text-emerald-300'
+                    }`}
+                  >
+                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
+                    <span>
+                      {justSaved ? 'Saved just now' : 'Last saved'}:{' '}
+                      <strong className="font-mono font-medium">{formatLastSaved(lastSavedAt)}</strong>
+                    </span>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-[11px] text-zinc-500">
+                    <Clock className="h-3.5 w-3.5" />
+                    Not saved yet
+                  </span>
+                )}
+
+                {isDirty && taxProfile && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProfileForm(buildInitialForm(taxProfile));
+                      setIsDirty(false);
+                      setJustSaved(false);
+                      setProfileError('');
+                      setProfileNotice('');
+                    }}
+                    className="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800"
+                  >
+                    Discard Changes
+                  </button>
+                )}
+
                 <button
-                  type="button"
-                  onClick={() => {
-                    setProfileForm(buildInitialForm(taxProfile));
-                    setIsDirty(false);
-                    setProfileError('');
-                    setProfileNotice('');
-                  }}
-                  className="rounded-lg border border-zinc-700 px-3 py-2 text-xs text-zinc-300 hover:bg-zinc-800"
+                  type="submit"
+                  disabled={savingProfile}
+                  title={
+                    !isDirty && lastSavedAt
+                      ? 'All changes are saved. Click to save again.'
+                      : 'Save Paystub & Tax Profile'
+                  }
+                  className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition disabled:opacity-50 ${
+                    savingProfile || isDirty || !lastSavedAt
+                      ? 'bg-emerald-500 text-zinc-950 hover:bg-emerald-400'
+                      : 'border border-emerald-500/40 bg-emerald-500/15 text-emerald-200 hover:bg-emerald-500/25'
+                  }`}
                 >
-                  Discard Changes
+                  {savingProfile ? (
+                    <>
+                      <Save className="h-3.5 w-3.5 animate-pulse" />
+                      Saving…
+                    </>
+                  ) : !isDirty && lastSavedAt ? (
+                    <>
+                      <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" />
+                      Saved
+                    </>
+                  ) : (
+                    <>
+                      <Save className="h-3.5 w-3.5" />
+                      Save Paystub & Tax Profile
+                    </>
+                  )}
                 </button>
-              )}
-              <button
-                type="submit"
-                disabled={savingProfile}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 px-4 py-2 text-xs font-semibold text-zinc-950 hover:bg-emerald-400 disabled:opacity-50"
-              >
-                <Save className="h-3.5 w-3.5" />
-                {savingProfile ? 'Saving…' : 'Save Paystub & Tax Profile'}
-              </button>
+              </div>
             </div>
           </div>
           </form>
