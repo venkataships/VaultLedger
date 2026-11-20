@@ -1458,4 +1458,92 @@ export function computeHouseholdPaystubSummary(profileForm, names = { primary_na
   };
 }
 
+// ============================================================================
+// Expenses & Money-Back Reimbursement Credit Helpers
+// ============================================================================
+
+export function isCreditEntry(item) {
+  return item?.entry_type === 'credit';
+}
+
+export function getSignedExpenseAmount(item) {
+  const amt = Math.abs(toNumber(item?.amount));
+  return isCreditEntry(item) ? -amt : amt;
+}
+
+export function summarizeExpensesList(items) {
+  let grossTotal = 0;
+  let creditsTotal = 0;
+  let grossNeeds = 0;
+  let grossWants = 0;
+  let creditNeeds = 0;
+  let creditWants = 0;
+  let expenseCount = 0;
+  let creditCount = 0;
+
+  const byCategoryNet = {};
+  const byCategoryGross = {};
+  const byCategoryCredits = {};
+
+  for (const item of items || []) {
+    const amt = Math.abs(toNumber(item?.amount));
+    const cat = item?.category || 'Other';
+    const isNeed = Boolean(item?.is_essential);
+
+    if (isCreditEntry(item)) {
+      creditsTotal += amt;
+      creditCount += 1;
+      if (isNeed) creditNeeds += amt;
+      else creditWants += amt;
+      byCategoryCredits[cat] = (byCategoryCredits[cat] || 0) + amt;
+      byCategoryNet[cat] = (byCategoryNet[cat] || 0) - amt;
+    } else {
+      grossTotal += amt;
+      expenseCount += 1;
+      if (isNeed) grossNeeds += amt;
+      else grossWants += amt;
+      byCategoryGross[cat] = (byCategoryGross[cat] || 0) + amt;
+      byCategoryNet[cat] = (byCategoryNet[cat] || 0) + amt;
+    }
+  }
+
+  const netTotal = grossTotal - creditsTotal;
+  const netNeeds = Math.max(0, grossNeeds - creditNeeds);
+  const netWants = Math.max(0, grossWants - creditWants);
+
+  const allCategories = new Set([
+    ...Object.keys(byCategoryNet),
+    ...Object.keys(byCategoryGross),
+    ...Object.keys(byCategoryCredits),
+  ]);
+
+  const categoriesSorted = Array.from(allCategories)
+    .map((category) => ({
+      category,
+      net: byCategoryNet[category] || 0,
+      gross: byCategoryGross[category] || 0,
+      credits: byCategoryCredits[category] || 0,
+    }))
+    .sort((a, b) => b.net - a.net || b.gross - a.gross);
+
+  return {
+    grossTotal,
+    creditsTotal,
+    netTotal,
+    grossNeeds,
+    grossWants,
+    creditNeeds,
+    creditWants,
+    netNeeds,
+    netWants,
+    expenseCount,
+    creditCount,
+    byCategoryNet,
+    byCategoryGross,
+    byCategoryCredits,
+    categoriesSorted,
+  };
+}
+
+
 

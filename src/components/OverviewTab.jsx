@@ -40,8 +40,10 @@ import {
   formatShortDate,
   getOwnerDisplayName,
   getRealAssetType,
+  getSignedExpenseAmount,
   ordinalDay,
   OWNER_PROFILES,
+  summarizeExpensesList,
   toNumber,
 } from '../lib/finance';
 
@@ -191,40 +193,41 @@ export default function OverviewTab({
     const monthExpenses = (expenses || []).filter((e) =>
       (e.expense_date || '').startsWith(curMonth)
     );
-    const totalSpent = monthExpenses.reduce((sum, e) => sum + toNumber(e.amount), 0);
-    const essentialSpent = monthExpenses
-      .filter((e) => e.is_essential)
-      .reduce((sum, e) => sum + toNumber(e.amount), 0);
-
-    const byCat = {};
-    for (const e of monthExpenses) {
-      byCat[e.category] = (byCat[e.category] || 0) + toNumber(e.amount);
-    }
-    const topCategories = Object.entries(byCat)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5);
+    const expSummary = summarizeExpensesList(monthExpenses);
+    const totalSpent = expSummary.netTotal;
+    const grossSpent = expSummary.grossTotal;
+    const creditsTotal = expSummary.creditsTotal;
+    const essentialSpent = expSummary.netNeeds;
+    const wantsSpent = expSummary.netWants;
+    const topCategories = expSummary.categoriesSorted.slice(0, 5);
 
     const totalBudgetObj = (budgets || []).find((b) => b.category === '_total_budget');
     const takeHomeObj = (budgets || []).find((b) => b.category === '_monthly_take_home');
     const monthlyBudget = totalBudgetObj ? toNumber(totalBudgetObj.monthly_limit) : 0;
     const monthlyTakeHome = takeHomeObj ? toNumber(takeHomeObj.monthly_limit) : 0;
 
-    const recurringBaseline = (recurringBills || [])
-      .filter((b) => b.is_active)
-      .reduce((s, b) => {
-        const amt = toNumber(b.amount);
-        if (b.cadence === 'annual') return s + amt / 12;
-        if (b.cadence === 'quarterly') return s + amt / 3;
-        return s + amt;
-      }, 0);
+    const recurringBaseline = Math.max(
+      0,
+      (recurringBills || [])
+        .filter((b) => b.is_active)
+        .reduce((s, b) => {
+          const amt = getSignedExpenseAmount(b);
+          if (b.cadence === 'annual') return s + amt / 12;
+          if (b.cadence === 'quarterly') return s + amt / 3;
+          return s + amt;
+        }, 0)
+    );
 
-    const monthlyBurnReference = Math.max(totalSpent, monthlyBudget, recurringBaseline);
+    const monthlyBurnReference = Math.max(0, totalSpent, monthlyBudget, recurringBaseline);
     const runwayMonths =
       monthlyBurnReference > 0 ? summary.banks / monthlyBurnReference : null;
 
     return {
       totalSpent,
+      grossSpent,
+      creditsTotal,
       essentialSpent,
+      wantsSpent,
       topCategories,
       monthlyBudget,
       monthlyTakeHome,
@@ -603,7 +606,11 @@ export default function OverviewTab({
             {/* 4. Monthly Spend & Cash Runway */}
             <div className="rounded-xl border border-zinc-800/90 bg-zinc-950/80 p-5">
               <div className="flex items-center justify-between text-xs text-zinc-400">
-                <span className="font-medium">{formatMonthLabel(curMonth)} Spend</span>
+                <span className="font-medium">
+                  {monthStats.creditsTotal > 0
+                    ? `${formatMonthLabel(curMonth)} Net Spend`
+                    : `${formatMonthLabel(curMonth)} Spend`}
+                </span>
                 <button
                   type="button"
                   onClick={() => onNavigateTab('expenses')}
@@ -618,10 +625,15 @@ export default function OverviewTab({
               <div className="mt-2.5 flex items-center justify-between text-[11px] text-zinc-400 tabular-nums">
                 <span>
                   {monthStats.monthlyBudget > 0 && householdScope === 'combined'
-                    ? `${Math.round((monthStats.totalSpent / monthStats.monthlyBudget) * 100)}% of ${mask(
+                    ? `${Math.max(0, Math.round((monthStats.totalSpent / monthStats.monthlyBudget) * 100))}% of ${mask(
                         formatCurrency(monthStats.monthlyBudget, { decimals: 0 })
                       )}`
-                    : `${monthStats.txCount} expenses logged`}
+                    : `${monthStats.txCount} items logged`}
+                  {monthStats.creditsTotal > 0 && (
+                    <span className="ml-1.5 text-emerald-400">
+                      (−{mask(formatCurrency(monthStats.creditsTotal, { decimals: 0 }))} back)
+                    </span>
+                  )}
                 </span>
                 {monthStats.runwayMonths !== null && (
                   <span className="text-sky-400">{monthStats.runwayMonths.toFixed(1)} mo cash runway</span>
@@ -1100,7 +1112,13 @@ export default function OverviewTab({
                   </h3>
                   <p className="text-xs text-zinc-500">
                     Needs {mask(formatCurrency(monthStats.essentialSpent))} • Wants{' '}
-                    {mask(formatCurrency(Math.max(0, monthStats.totalSpent - monthStats.essentialSpent)))}
+                    {mask(formatCurrency(monthStats.wantsSpent))}
+                    {monthStats.creditsTotal > 0 && (
+                      <span className="text-emerald-400">
+                        {' '}
+                        • −{mask(formatCurrency(monthStats.creditsTotal, { decimals: 0 }))} back
+                      </span>
+                    )}
                   </p>
                 </div>
                 <button
@@ -1128,22 +1146,45 @@ export default function OverviewTab({
                 </div>
               ) : (
                 <div className="space-y-3.5">
-                  {monthStats.topCategories.map(([cat, amt]) => {
-                    const pct = monthStats.totalSpent > 0 ? (amt / monthStats.totalSpent) * 100 : 0;
+                  {monthStats.topCategories.map(({ category: cat, net, credits }) => {
+                    const pct =
+                      net > 0 && monthStats.totalSpent > 0
+                        ? (net / monthStats.totalSpent) * 100
+                        : 0;
                     const color = CATEGORY_COLORS[cat] || '#10b981';
                     return (
                       <div key={cat}>
                         <div className="mb-1 flex items-center justify-between text-xs">
-                          <span className="font-medium text-zinc-300">{cat}</span>
+                          <span className="font-medium text-zinc-300">
+                            {cat}
+                            {credits > 0 && (
+                              <span className="ml-1.5 text-[10px] font-normal text-emerald-400">
+                                (−{mask(formatCurrency(credits, { decimals: 0 }))} back)
+                              </span>
+                            )}
+                          </span>
                           <span className="font-mono text-zinc-200 tabular-nums">
-                            {mask(formatCurrency(amt))}{' '}
-                            <span className="text-[11px] text-zinc-500">({formatPercent(pct, 0)})</span>
+                            {net < 0 ? (
+                              <span className="text-emerald-300">
+                                +{mask(formatCurrency(Math.abs(net)))} back
+                              </span>
+                            ) : (
+                              <>
+                                {mask(formatCurrency(net))}{' '}
+                                <span className="text-[11px] text-zinc-500">
+                                  ({formatPercent(pct, 0)})
+                                </span>
+                              </>
+                            )}
                           </span>
                         </div>
                         <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-900">
                           <div
                             className="h-full rounded-full transition-all duration-300"
-                            style={{ width: `${Math.max(3, pct)}%`, backgroundColor: color }}
+                            style={{
+                              width: `${net > 0 ? Math.min(100, Math.max(3, pct)) : 0}%`,
+                              backgroundColor: color,
+                            }}
                           />
                         </div>
                       </div>

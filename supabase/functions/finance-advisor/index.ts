@@ -767,39 +767,75 @@ function buildSanitizedFinancialContext(params: {
       };
     });
 
-  // Monthly Expenses summary (last 3 months grouped)
-  const monthlySpend: Record<string, { total: number; essential: number; byCategory: Record<string, number> }> = {};
+  // Monthly Expenses summary (last 3 months grouped, netting Money Back / Credit entries)
+  const monthlySpend: Record<
+    string,
+    {
+      gross: number;
+      credits: number;
+      essentialGross: number;
+      essentialCredits: number;
+      byCategoryNet: Record<string, number>;
+    }
+  > = {};
   for (const e of expenses) {
     const mk = String(e.expense_date || '').slice(0, 7);
     if (!mk) continue;
-    if (!monthlySpend[mk]) monthlySpend[mk] = { total: 0, essential: 0, byCategory: {} };
-    const amt = num(e.amount);
-    monthlySpend[mk].total += amt;
-    if (e.is_essential) monthlySpend[mk].essential += amt;
+    if (!monthlySpend[mk]) {
+      monthlySpend[mk] = {
+        gross: 0,
+        credits: 0,
+        essentialGross: 0,
+        essentialCredits: 0,
+        byCategoryNet: {},
+      };
+    }
+    const amt = Math.abs(num(e.amount));
+    const isCredit = e.entry_type === 'credit';
+    if (isCredit) {
+      monthlySpend[mk].credits += amt;
+      if (e.is_essential) monthlySpend[mk].essentialCredits += amt;
+    } else {
+      monthlySpend[mk].gross += amt;
+      if (e.is_essential) monthlySpend[mk].essentialGross += amt;
+    }
     const cat = String(e.category || 'Other');
-    monthlySpend[mk].byCategory[cat] = (monthlySpend[mk].byCategory[cat] || 0) + amt;
+    monthlySpend[mk].byCategoryNet[cat] =
+      (monthlySpend[mk].byCategoryNet[cat] || 0) + (isCredit ? -amt : amt);
   }
   const recentMonths = Object.entries(monthlySpend)
     .sort((a, b) => b[0].localeCompare(a[0]))
     .slice(0, 3)
-    .map(([month, data]) => ({
-      month,
-      total_spent_usd: Number(data.total.toFixed(2)),
-      essential_spent_usd: Number(data.essential.toFixed(2)),
-      top_categories: Object.entries(data.byCategory)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 6)
-        .map(([c, amt]) => ({ category: c, usd: Number(amt.toFixed(2)) })),
-    }));
+    .map(([month, data]) => {
+      const netSpent = data.gross - data.credits;
+      const essentialNet = Math.max(0, data.essentialGross - data.essentialCredits);
+      const item: Record<string, unknown> = {
+        month,
+        net_spent_usd: r2(netSpent),
+        essential_net_usd: r2(essentialNet),
+        top_categories: Object.entries(data.byCategoryNet)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, 6)
+          .map(([c, amt]) => ({ category: c, net_usd: r2(amt) })),
+      };
+      if (data.credits > 0) {
+        item.gross_spent_usd = r2(data.gross);
+        item.money_back_credits_usd = r2(data.credits);
+      }
+      return item;
+    });
 
-  const recurringMonthlyTotal = bills
-    .filter((b) => b.is_active)
-    .reduce((sum, b) => {
-      const amt = num(b.amount);
-      if (b.cadence === 'annual') return sum + amt / 12;
-      if (b.cadence === 'quarterly') return sum + amt / 3;
-      return sum + amt;
-    }, 0);
+  let recurringBillsMonthly = 0;
+  let recurringCreditsMonthly = 0;
+  for (const b of bills) {
+    if (!b.is_active) continue;
+    const amt = Math.abs(num(b.amount));
+    const monthlyAmt =
+      b.cadence === 'annual' ? amt / 12 : b.cadence === 'quarterly' ? amt / 3 : amt;
+    if (b.entry_type === 'credit') recurringCreditsMonthly += monthlyAmt;
+    else recurringBillsMonthly += monthlyAmt;
+  }
+  const recurringMonthlyTotal = Math.max(0, recurringBillsMonthly - recurringCreditsMonthly);
 
   const budgetMap: Record<string, number> = {};
   for (const b of budgets) {
@@ -860,7 +896,9 @@ function buildSanitizedFinancialContext(params: {
     },
     active_zero_pct_promos: activePromos,
     recent_monthly_expenses: recentMonths,
-    recurring_bills_monthly_baseline_usd: Number(recurringMonthlyTotal.toFixed(2)),
+    recurring_bills_monthly_baseline_usd: r2(recurringMonthlyTotal),
+    recurring_credits_monthly_usd:
+      recurringCreditsMonthly > 0 ? r2(recurringCreditsMonthly) : undefined,
     budgets: Object.keys(budgetMap).length > 0 ? budgetMap : undefined,
     tax_and_comp_profile: taxProfile
       ? buildPaystubSnapshot(taxProfile, primaryName, spouseName)

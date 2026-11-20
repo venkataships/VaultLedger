@@ -29,9 +29,12 @@ import {
   formatMonthLabel,
   formatPercent,
   getOwnerDisplayName,
+  getSignedExpenseAmount,
+  isCreditEntry,
   ordinalDay,
   OWNER_PROFILES,
   shiftMonthKey,
+  summarizeExpensesList,
   todayIsoDate,
   toNumber,
 } from '../lib/finance';
@@ -55,7 +58,8 @@ export default function ExpensesTab({
     ? householdScope
     : 'primary';
 
-  // Quick-add expense form
+  // Quick-add expense / credit form
+  const [entryType, setEntryType] = useState('expense'); // 'expense' | 'credit'
   const [expDate, setExpDate] = useState(todayIsoDate());
   const [expOwner, setExpOwner] = useState(defaultOwner);
   const [merchant, setMerchant] = useState('');
@@ -68,8 +72,9 @@ export default function ExpensesTab({
   // Edit expense modal
   const [editingExpense, setEditingExpense] = useState(null);
 
-  // Recurring Bills modal
+  // Recurring Bills & Credits modal
   const [billModalOpen, setBillModalOpen] = useState(false);
+  const [billEntryType, setBillEntryType] = useState('expense'); // 'expense' | 'credit'
   const [billOwner, setBillOwner] = useState(defaultOwner);
   const [billName, setBillName] = useState('');
   const [billCategory, setBillCategory] = useState('Housing');
@@ -121,27 +126,19 @@ export default function ExpensesTab({
   }, [monthExpenses, catFilter, searchQuery]);
 
   const metrics = useMemo(() => {
-    let total = 0;
-    let essential = 0;
+    const expSummary = summarizeExpensesList(monthExpenses);
     let recurringPosted = 0;
-    const byCat = {};
 
     for (const e of monthExpenses) {
-      const amt = toNumber(e.amount);
-      total += amt;
-      if (e.is_essential) essential += amt;
-      if (e.recurring_bill_id) recurringPosted += amt;
-      byCat[e.category] = (byCat[e.category] || 0) + amt;
+      if (e.recurring_bill_id) recurringPosted += getSignedExpenseAmount(e);
     }
-
-    const categoriesSorted = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
 
     const budgetRow = (budgets || []).find((b) => b.category === '_total_budget');
     const takeHomeRow = (budgets || []).find((b) => b.category === '_monthly_take_home');
     const monthlyBudget = budgetRow ? toNumber(budgetRow.monthly_limit) : 0;
     const monthlyTakeHome = takeHomeRow ? toNumber(takeHomeRow.monthly_limit) : 0;
 
-    // Unposted active monthly recurring bills for selectedMonth
+    // Unposted active monthly recurring bills/credits for selectedMonth
     const postedBillIds = new Set(
       monthExpenses.map((e) => e.recurring_bill_id).filter(Boolean)
     );
@@ -149,30 +146,42 @@ export default function ExpensesTab({
       (b) => b.is_active && b.cadence === 'monthly' && !postedBillIds.has(b.id)
     );
 
+    let activeBillsMonthly = 0;
+    let activeCreditsMonthly = 0;
+    for (const b of recurringBills || []) {
+      if (!b.is_active) continue;
+      const amt = Math.abs(toNumber(b.amount));
+      const mAmt = b.cadence === 'annual' ? amt / 12 : b.cadence === 'quarterly' ? amt / 3 : amt;
+      if (isCreditEntry(b)) activeCreditsMonthly += mAmt;
+      else activeBillsMonthly += mAmt;
+    }
+
     return {
-      total,
-      essential,
-      wants: Math.max(0, total - essential),
+      total: expSummary.netTotal,
+      grossTotal: expSummary.grossTotal,
+      creditsTotal: expSummary.creditsTotal,
+      essential: expSummary.netNeeds,
+      wants: expSummary.netWants,
+      expenseCount: expSummary.expenseCount,
+      creditCount: expSummary.creditCount,
       recurringPosted,
-      categoriesSorted,
+      categoriesSorted: expSummary.categoriesSorted,
       monthlyBudget,
       monthlyTakeHome,
       unpostedMonthlyBills,
+      activeBillsMonthly,
+      activeCreditsMonthly,
+      netRecurringMonthly: activeBillsMonthly - activeCreditsMonthly,
     };
   }, [monthExpenses, budgets, recurringBills]);
 
-  // 6-Month Spending Trend Chart Data
+  // 6-Month Spending Trend Chart Data (net of credits)
   const sixMonthSeries = useMemo(() => {
     const months = [];
     for (let i = 5; i >= 0; i--) {
       const mk = shiftMonthKey(selectedMonth, -i);
       const rows = (expenses || []).filter((e) => (e.expense_date || '').startsWith(mk));
-      let needs = 0;
-      let wants = 0;
-      for (const r of rows) {
-        if (r.is_essential) needs += toNumber(r.amount);
-        else wants += toNumber(r.amount);
-      }
+      const s = summarizeExpensesList(rows);
       const [y, m] = mk.split('-');
       const shortLabel = new Date(Number(y), Number(m) - 1, 1).toLocaleDateString('en-US', {
         month: 'short',
@@ -181,9 +190,9 @@ export default function ExpensesTab({
       months.push({
         monthKey: mk,
         label: shortLabel,
-        Needs: Number(needs.toFixed(2)),
-        Wants: Number(wants.toFixed(2)),
-        Total: Number((needs + wants).toFixed(2)),
+        Needs: Number(s.netNeeds.toFixed(2)),
+        Wants: Number(s.netWants.toFixed(2)),
+        Total: Number(Math.max(0, s.netTotal).toFixed(2)),
       });
     }
     return months;
@@ -198,6 +207,7 @@ export default function ExpensesTab({
     try {
       const { error } = await supabase.from('expenses').insert({
         owner_profile: expOwner || 'primary',
+        entry_type: entryType === 'credit' ? 'credit' : 'expense',
         expense_date: expDate,
         merchant: merchant.trim(),
         category,
@@ -209,6 +219,7 @@ export default function ExpensesTab({
 
       setMerchant('');
       setAmount('');
+      setEntryType('expense');
       // If user added an expense in another month, switch to that month so they see it immediately
       if (expDate.slice(0, 7) !== selectedMonth) {
         setSelectedMonth(expDate.slice(0, 7));
@@ -229,6 +240,7 @@ export default function ExpensesTab({
       .from('expenses')
       .update({
         owner_profile: editingExpense.owner_profile || 'primary',
+        entry_type: editingExpense.entry_type === 'credit' ? 'credit' : 'expense',
         expense_date: editingExpense.expense_date,
         merchant: editingExpense.merchant.trim(),
         category: editingExpense.category,
@@ -259,8 +271,10 @@ export default function ExpensesTab({
 
       const rows = metrics.unpostedMonthlyBills.map((b) => {
         const day = Math.min(b.due_day || 1, maxDayInMonth);
+        const credit = isCreditEntry(b);
         return {
           owner_profile: b.owner_profile || 'primary',
+          entry_type: credit ? 'credit' : 'expense',
           expense_date: `${selectedMonth}-${String(day).padStart(2, '0')}`,
           merchant: b.name,
           category: b.category,
@@ -268,7 +282,7 @@ export default function ExpensesTab({
           payment_account_id: b.payment_account_id || null,
           recurring_bill_id: b.id,
           is_essential: b.is_essential,
-          notes: 'Recurring bill posted',
+          notes: credit ? 'Recurring credit posted' : 'Recurring bill posted',
         };
       });
 
@@ -289,6 +303,7 @@ export default function ExpensesTab({
     try {
       const { error } = await supabase.from('recurring_bills').insert({
         owner_profile: billOwner || 'primary',
+        entry_type: billEntryType === 'credit' ? 'credit' : 'expense',
         name: billName.trim(),
         category: billCategory,
         amount: amt,
@@ -302,6 +317,7 @@ export default function ExpensesTab({
       if (error) throw error;
       setBillName('');
       setBillAmount('');
+      setBillEntryType('expense');
       await onDataChanged();
     } finally {
       setSavingBill(false);
@@ -352,15 +368,25 @@ export default function ExpensesTab({
   };
 
   const handleExportCsv = () => {
-    const header = ['Date', 'Merchant', 'Category', 'Amount', 'Type', 'Paid From', 'Notes'];
+    const header = [
+      'Date',
+      'Entry Type',
+      'Merchant',
+      'Category',
+      'Amount',
+      'Class',
+      'Paid From / Account',
+      'Notes',
+    ];
     const lines = [header.join(',')];
     for (const e of monthExpenses) {
       const accName = e.payment_account_id ? accountMap.get(e.payment_account_id)?.name || '' : '';
       const row = [
         e.expense_date,
+        isCreditEntry(e) ? 'Money Back' : 'Expense',
         `"${(e.merchant || '').replace(/"/g, '""')}"`,
         `"${e.category}"`,
-        toNumber(e.amount).toFixed(2),
+        getSignedExpenseAmount(e).toFixed(2),
         e.is_essential ? 'Need' : 'Want',
         `"${accName.replace(/"/g, '""')}"`,
         `"${(e.notes || '').replace(/"/g, '""')}"`,
@@ -377,7 +403,7 @@ export default function ExpensesTab({
   };
 
   const budgetPct =
-    metrics.monthlyBudget > 0 ? (metrics.total / metrics.monthlyBudget) * 100 : null;
+    metrics.monthlyBudget > 0 ? (Math.max(0, metrics.total) / metrics.monthlyBudget) * 100 : null;
 
   return (
     <div className="space-y-6">
@@ -445,7 +471,7 @@ export default function ExpensesTab({
             className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs font-medium text-zinc-300 hover:border-zinc-700"
           >
             <CalendarClock className="h-3.5 w-3.5 text-sky-400" />
-            Recurring Bills ({(recurringBills || []).length})
+            Recurring ({(recurringBills || []).length})
           </button>
           <button
             type="button"
@@ -469,12 +495,24 @@ export default function ExpensesTab({
       {/* Monthly KPI Strip */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-xl border border-zinc-800/90 bg-zinc-950/80 p-4">
-          <div className="text-xs text-zinc-400">Total Monthly Spend</div>
+          <div className="text-xs text-zinc-400">
+            {metrics.creditsTotal > 0 ? 'Net Monthly Spend' : 'Total Monthly Spend'}
+          </div>
           <div className="mt-1.5 font-mono text-2xl font-bold text-zinc-50 tabular-nums">
             {mask(formatCurrency(metrics.total))}
           </div>
-          <div className="mt-1.5 text-[11px] text-zinc-500">
-            {monthExpenses.length} logged expense{monthExpenses.length === 1 ? '' : 's'}
+          <div className="mt-1.5 text-[11px] text-zinc-500 tabular-nums">
+            {metrics.creditsTotal > 0 ? (
+              <>
+                Gross {mask(formatCurrency(metrics.grossTotal, { decimals: 0 }))}{' '}
+                <span className="text-emerald-400">
+                  − {mask(formatCurrency(metrics.creditsTotal, { decimals: 0 }))} back
+                </span>{' '}
+                • {monthExpenses.length} items
+              </>
+            ) : (
+              `${monthExpenses.length} logged expense${monthExpenses.length === 1 ? '' : 's'}`
+            )}
           </div>
         </div>
 
@@ -521,7 +559,10 @@ export default function ExpensesTab({
           </div>
           <div className="mt-1 text-xs text-zinc-400 tabular-nums">
             Wants: <span className="font-mono text-amber-300">{mask(formatCurrency(metrics.wants))}</span> (
-            {metrics.total > 0 ? formatPercent((metrics.wants / metrics.total) * 100, 0) : '0%'})
+            {metrics.essential + metrics.wants > 0
+              ? formatPercent((metrics.wants / (metrics.essential + metrics.wants)) * 100, 0)
+              : '0%'}
+            )
           </div>
         </div>
 
@@ -563,7 +604,7 @@ export default function ExpensesTab({
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-5">
         <div className="rounded-xl border border-zinc-800/90 bg-zinc-950/80 p-5 lg:col-span-3">
           <h3 className="mb-1 text-sm font-semibold text-zinc-100">6-Month Expense Trend</h3>
-          <p className="mb-4 text-xs text-zinc-500">Essential needs vs. discretionary wants by month</p>
+          <p className="mb-4 text-xs text-zinc-500">Net essential needs vs. discretionary wants by month</p>
           <div className="h-56 w-full">
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={sixMonthSeries} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
@@ -600,8 +641,8 @@ export default function ExpensesTab({
             <div className="py-12 text-center text-xs text-zinc-500">No spending in this month yet.</div>
           ) : (
             <div className="max-h-56 space-y-3 overflow-y-auto pr-1">
-              {metrics.categoriesSorted.map(([cat, amt]) => {
-                const pct = metrics.total > 0 ? (amt / metrics.total) * 100 : 0;
+              {metrics.categoriesSorted.map(({ category: cat, net, credits }) => {
+                const pct = net > 0 && metrics.total > 0 ? (net / metrics.total) * 100 : 0;
                 const active = catFilter === cat;
                 return (
                   <button
@@ -612,17 +653,30 @@ export default function ExpensesTab({
                       active ? 'bg-zinc-900 ring-1 ring-emerald-500/40' : 'hover:bg-zinc-900/50'
                     }`}
                   >
-                    <div className="mb-1 flex justify-between text-xs">
-                      <span className="font-medium text-zinc-200">{cat}</span>
+                    <div className="mb-1 flex justify-between gap-2 text-xs">
+                      <span className="font-medium text-zinc-200">
+                        {cat}
+                        {credits > 0 && (
+                          <span className="ml-1.5 text-[10px] font-normal text-emerald-400">
+                            (−{mask(formatCurrency(credits, { decimals: 0 }))} back)
+                          </span>
+                        )}
+                      </span>
                       <span className="font-mono text-zinc-300 tabular-nums">
-                        {mask(formatCurrency(amt))} ({formatPercent(pct, 0)})
+                        {net < 0 ? (
+                          <span className="text-emerald-300">
+                            +{mask(formatCurrency(Math.abs(net)))} net back
+                          </span>
+                        ) : (
+                          `${mask(formatCurrency(net))} (${formatPercent(pct, 0)})`
+                        )}
                       </span>
                     </div>
                     <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-900">
                       <div
                         className="h-full rounded-full"
                         style={{
-                          width: `${Math.max(3, pct)}%`,
+                          width: `${net > 0 ? Math.min(100, Math.max(3, pct)) : 0}%`,
                           backgroundColor: CATEGORY_COLORS[cat] || '#10b981',
                         }}
                       />
@@ -635,13 +689,44 @@ export default function ExpensesTab({
         </div>
       </div>
 
-      {/* Fast Inline Add Expense Bar */}
+      {/* Fast Inline Add Expense / Money Back Bar */}
       <form
         onSubmit={handleQuickAddExpense}
-        className="rounded-xl border border-zinc-800/90 bg-zinc-950/90 p-4"
+        className={`rounded-xl border p-4 transition ${
+          entryType === 'credit'
+            ? 'border-emerald-500/35 bg-emerald-500/[0.03]'
+            : 'border-zinc-800/90 bg-zinc-950/90'
+        }`}
       >
         <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-semibold text-zinc-300">
-          <span>Quick Log Expense</span>
+          <div className="flex flex-wrap items-center gap-2.5">
+            <span>{entryType === 'credit' ? 'Log Money Back / Reimbursement' : 'Quick Log Expense'}</span>
+            <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-[11px] font-medium">
+              <button
+                type="button"
+                onClick={() => setEntryType('expense')}
+                className={`rounded-md px-2 py-0.5 transition ${
+                  entryType === 'expense'
+                    ? 'bg-zinc-800 text-zinc-100'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                Expense
+              </button>
+              <button
+                type="button"
+                onClick={() => setEntryType('credit')}
+                className={`rounded-md px-2 py-0.5 transition ${
+                  entryType === 'credit'
+                    ? 'bg-emerald-500/20 text-emerald-200'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                Money Back / Credit
+              </button>
+            </div>
+          </div>
+
           <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-[11px] font-medium">
             {[
               { key: 'primary', label: householdNames?.primary_name || 'Me' },
@@ -678,7 +763,11 @@ export default function ExpensesTab({
           <input
             type="text"
             required
-            placeholder="Merchant or description (e.g., Trader Joe's, Electric)"
+            placeholder={
+              entryType === 'credit'
+                ? 'Source (e.g., Friend stay / rent share, utility split, refund)'
+                : "Merchant or description (e.g., Trader Joe's, Electric)"
+            }
             value={merchant}
             onChange={(e) => setMerchant(e.target.value)}
             className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100 lg:col-span-3"
@@ -699,7 +788,7 @@ export default function ExpensesTab({
             step="0.01"
             min="0"
             required
-            placeholder="Amount ($)"
+            placeholder={entryType === 'credit' ? 'Money back ($)' : 'Amount ($)'}
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
             className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-100 lg:col-span-2"
@@ -709,7 +798,9 @@ export default function ExpensesTab({
             onChange={(e) => setPaymentAccountId(e.target.value)}
             className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-xs text-zinc-300 lg:col-span-2"
           >
-            <option value="">Paid from (optional)</option>
+            <option value="">
+              {entryType === 'credit' ? 'Received into (optional)' : 'Paid from (optional)'}
+            </option>
             {(accounts || [])
               .filter((a) => !a.is_archived && (a.category === 'credit_card' || a.category === 'bank'))
               .map((a) => (
@@ -722,7 +813,11 @@ export default function ExpensesTab({
             <button
               type="button"
               onClick={() => setIsEssential(!isEssential)}
-              title="Toggle Essential Need vs Discretionary Want"
+              title={
+                entryType === 'credit'
+                  ? 'Offsets Essential Needs vs. Discretionary Wants'
+                  : 'Toggle Essential Need vs Discretionary Want'
+              }
               className={`rounded-lg border px-2 py-2 text-[11px] font-medium ${
                 isEssential
                   ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
@@ -735,7 +830,7 @@ export default function ExpensesTab({
               type="submit"
               disabled={addingExpense}
               className="flex flex-1 items-center justify-center rounded-lg bg-emerald-500 p-2 text-zinc-950 hover:bg-emerald-400 disabled:opacity-50"
-              title="Add Expense"
+              title={entryType === 'credit' ? 'Add Money Back / Credit' : 'Add Expense'}
             >
               <Plus className="h-4 w-4" />
             </button>
@@ -794,8 +889,12 @@ export default function ExpensesTab({
                   const paidAcc = e.payment_account_id ? accountMap.get(e.payment_account_id) : null;
                   const ownerKey = e.owner_profile || 'primary';
                   const ownerBadge = OWNER_PROFILES[ownerKey] || OWNER_PROFILES.primary;
+                  const credit = isCreditEntry(e);
                   return (
-                    <tr key={e.id} className="hover:bg-zinc-900/40">
+                    <tr
+                      key={e.id}
+                      className={credit ? 'bg-emerald-500/[0.04] hover:bg-emerald-500/[0.08]' : 'hover:bg-zinc-900/40'}
+                    >
                       <td className="whitespace-nowrap py-2.5 pr-3 font-mono text-zinc-400">
                         {e.expense_date}
                       </td>
@@ -804,6 +903,11 @@ export default function ExpensesTab({
                         <span className={`ml-2 rounded border px-1.5 py-0.5 text-[10px] font-normal ${ownerBadge.badgeClass}`}>
                           {getOwnerDisplayName(ownerKey, householdNames)}
                         </span>
+                        {credit && (
+                          <span className="ml-1.5 rounded border border-emerald-500/35 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-normal text-emerald-300">
+                            Money Back
+                          </span>
+                        )}
                         {e.recurring_bill_id && (
                           <span className="ml-1.5 rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-normal text-sky-300">
                             Recurring
@@ -815,21 +919,38 @@ export default function ExpensesTab({
                       <td className="py-2.5 pr-3">
                         <span
                           className={`rounded px-1.5 py-0.5 text-[10px] ${
-                            e.is_essential
+                            credit
+                              ? 'bg-emerald-500/15 text-emerald-300'
+                              : e.is_essential
                               ? 'bg-emerald-500/10 text-emerald-300'
                               : 'bg-amber-500/10 text-amber-300'
                           }`}
                         >
-                          {e.is_essential ? 'Need' : 'Want'}
+                          {credit
+                            ? `Credit • ${e.is_essential ? 'Need' : 'Want'}`
+                            : e.is_essential
+                            ? 'Need'
+                            : 'Want'}
                         </span>
                       </td>
-                      <td className="whitespace-nowrap py-2.5 text-right font-mono font-medium text-zinc-100 tabular-nums">
-                        {mask(formatCurrency(e.amount))}
+                      <td
+                        className={`whitespace-nowrap py-2.5 text-right font-mono font-medium tabular-nums ${
+                          credit ? 'text-emerald-300' : 'text-zinc-100'
+                        }`}
+                      >
+                        {credit
+                          ? mask(formatCurrency(-Math.abs(toNumber(e.amount))))
+                          : mask(formatCurrency(e.amount))}
                       </td>
                       <td className="whitespace-nowrap py-2.5 text-right">
                         <button
                           type="button"
-                          onClick={() => setEditingExpense({ ...e })}
+                          onClick={() =>
+                            setEditingExpense({
+                              ...e,
+                              entry_type: credit ? 'credit' : 'expense',
+                            })
+                          }
                           className="mr-2 text-zinc-500 hover:text-zinc-200"
                         >
                           <Pencil className="inline h-3.5 w-3.5" />
@@ -851,12 +972,14 @@ export default function ExpensesTab({
         )}
       </div>
 
-      {/* MODAL: Edit Expense */}
+      {/* MODAL: Edit Expense / Credit */}
       {editingExpense && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
           <div className="w-full max-w-md rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl">
             <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
-              <h3 className="text-base font-semibold text-zinc-100">Edit Expense</h3>
+              <h3 className="text-base font-semibold text-zinc-100">
+                {editingExpense.entry_type === 'credit' ? 'Edit Money-Back Credit' : 'Edit Expense'}
+              </h3>
               <button
                 type="button"
                 onClick={() => setEditingExpense(null)}
@@ -866,7 +989,20 @@ export default function ExpensesTab({
               </button>
             </div>
             <form onSubmit={handleSaveEditedExpense} className="space-y-3 text-xs">
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
+                <label className="block text-zinc-300">
+                  Entry Type
+                  <select
+                    value={editingExpense.entry_type === 'credit' ? 'credit' : 'expense'}
+                    onChange={(e) =>
+                      setEditingExpense({ ...editingExpense, entry_type: e.target.value })
+                    }
+                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-zinc-100"
+                  >
+                    <option value="expense">Expense (Outflow)</option>
+                    <option value="credit">Money Back (Credit)</option>
+                  </select>
+                </label>
                 <label className="block text-zinc-300">
                   Date
                   <input
@@ -884,6 +1020,7 @@ export default function ExpensesTab({
                   <input
                     type="number"
                     step="0.01"
+                    min="0"
                     required
                     value={editingExpense.amount}
                     onChange={(e) => setEditingExpense({ ...editingExpense, amount: e.target.value })}
@@ -947,6 +1084,16 @@ export default function ExpensesTab({
                   </select>
                 </label>
               </div>
+              <label className="block text-zinc-300">
+                Notes (optional)
+                <input
+                  type="text"
+                  placeholder="e.g., Friend stay contribution for Nov rent"
+                  value={editingExpense.notes || ''}
+                  onChange={(e) => setEditingExpense({ ...editingExpense, notes: e.target.value })}
+                  className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-zinc-100"
+                />
+              </label>
               <div className="flex justify-end gap-2 pt-2">
                 <button
                   type="button"
@@ -967,15 +1114,17 @@ export default function ExpensesTab({
         </div>
       )}
 
-      {/* MODAL: Recurring Bills Manager */}
+      {/* MODAL: Recurring Bills & Credits Manager */}
       {billModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 p-4 backdrop-blur-sm">
           <div className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl">
             <div className="mb-4 flex items-center justify-between border-b border-zinc-800 pb-3">
               <div>
-                <h3 className="text-base font-semibold text-zinc-100">Recurring Monthly Bills & Subscriptions</h3>
+                <h3 className="text-base font-semibold text-zinc-100">
+                  Recurring Bills & Money-Back Credits
+                </h3>
                 <p className="text-xs text-zinc-500">
-                  Define fixed obligations once and post them into any month’s ledger with a single click.
+                  Define fixed bills or recurring reimbursements (e.g., friend rent share) once and post into any month’s ledger.
                 </p>
               </div>
               <button
@@ -984,6 +1133,31 @@ export default function ExpensesTab({
                 className="text-zinc-500 hover:text-zinc-200"
               >
                 <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="mb-3 inline-flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-900 p-0.5 text-[11px] font-medium">
+              <button
+                type="button"
+                onClick={() => setBillEntryType('expense')}
+                className={`rounded-md px-2.5 py-1 transition ${
+                  billEntryType === 'expense'
+                    ? 'bg-zinc-800 text-zinc-100'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                Bill (Outflow)
+              </button>
+              <button
+                type="button"
+                onClick={() => setBillEntryType('credit')}
+                className={`rounded-md px-2.5 py-1 transition ${
+                  billEntryType === 'credit'
+                    ? 'bg-emerald-500/20 text-emerald-200'
+                    : 'text-zinc-500 hover:text-zinc-300'
+                }`}
+              >
+                Money Back (Credit)
               </button>
             </div>
 
@@ -1000,7 +1174,11 @@ export default function ExpensesTab({
               <input
                 type="text"
                 required
-                placeholder="Bill name (Rent, Fiber…)"
+                placeholder={
+                  billEntryType === 'credit'
+                    ? 'e.g., Friend Rent Share, Utility Split'
+                    : 'Bill name (Rent, Fiber…)'
+                }
                 value={billName}
                 onChange={(e) => setBillName(e.target.value)}
                 className="rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-zinc-100 sm:col-span-2"
@@ -1019,8 +1197,9 @@ export default function ExpensesTab({
               <input
                 type="number"
                 step="0.01"
+                min="0"
                 required
-                placeholder="Amount ($)"
+                placeholder={billEntryType === 'credit' ? 'Credit ($)' : 'Amount ($)'}
                 value={billAmount}
                 onChange={(e) => setBillAmount(e.target.value)}
                 className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 font-mono text-zinc-100"
@@ -1048,7 +1227,11 @@ export default function ExpensesTab({
                 onChange={(e) => setBillAccount(e.target.value)}
                 className="rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-2 text-zinc-300 sm:col-span-2"
               >
-                <option value="">Paid from account (optional)</option>
+                <option value="">
+                  {billEntryType === 'credit'
+                    ? 'Received into (optional)'
+                    : 'Paid from account (optional)'}
+                </option>
                 {(accounts || [])
                   .filter((a) => !a.is_archived)
                   .map((a) => (
@@ -1073,7 +1256,7 @@ export default function ExpensesTab({
                 disabled={savingBill}
                 className="rounded-lg bg-emerald-500 px-3 py-2 font-semibold text-zinc-950 hover:bg-emerald-400"
               >
-                + Add Bill
+                {billEntryType === 'credit' ? '+ Add Credit' : '+ Add Bill'}
               </button>
             </form>
 
@@ -1081,6 +1264,7 @@ export default function ExpensesTab({
               {(recurringBills || []).map((b) => {
                 const ownerKey = b.owner_profile || 'primary';
                 const ownerBadge = OWNER_PROFILES[ownerKey] || OWNER_PROFILES.primary;
+                const credit = isCreditEntry(b);
                 return (
                 <div key={b.id} className="flex items-center justify-between py-3 text-xs">
                   <div>
@@ -1089,14 +1273,25 @@ export default function ExpensesTab({
                       <span className={`rounded border px-1.5 py-0.5 text-[10px] font-normal ${ownerBadge.badgeClass}`}>
                         {getOwnerDisplayName(ownerKey, householdNames)}
                       </span>
+                      {credit && (
+                        <span className="rounded border border-emerald-500/35 bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-normal text-emerald-300">
+                          Money Back
+                        </span>
+                      )}
                     </div>
                     <div className="text-[11px] text-zinc-500">
                       {b.category} • {b.cadence} {b.due_day ? `• Due ${ordinalDay(b.due_day)}` : ''}
                     </div>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="font-mono font-semibold text-zinc-100 tabular-nums">
-                      {mask(formatCurrency(b.amount))}
+                    <span
+                      className={`font-mono font-semibold tabular-nums ${
+                        credit ? 'text-emerald-300' : 'text-zinc-100'
+                      }`}
+                    >
+                      {credit
+                        ? mask(formatCurrency(-Math.abs(toNumber(b.amount))))
+                        : mask(formatCurrency(b.amount))}
                     </span>
                     <button
                       type="button"
@@ -1111,10 +1306,33 @@ export default function ExpensesTab({
               })}
               {(!recurringBills || recurringBills.length === 0) && (
                 <div className="py-8 text-center text-xs text-zinc-500">
-                  No recurring bills configured yet.
+                  No recurring bills or credits configured yet.
                 </div>
               )}
             </div>
+
+            {(metrics.activeBillsMonthly > 0 || metrics.activeCreditsMonthly > 0) && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-900/50 px-4 py-2.5 text-[11px] tabular-nums">
+                <span className="text-zinc-400">
+                  Active monthly equivalents: Bills{' '}
+                  <strong className="font-mono text-zinc-200">
+                    {mask(formatCurrency(metrics.activeBillsMonthly))}/mo
+                  </strong>
+                  {metrics.activeCreditsMonthly > 0 && (
+                    <>
+                      {' '}
+                      − Credits{' '}
+                      <strong className="font-mono text-emerald-300">
+                        {mask(formatCurrency(metrics.activeCreditsMonthly))}/mo
+                      </strong>
+                    </>
+                  )}
+                </span>
+                <span className="font-mono font-semibold text-zinc-100">
+                  Net Recurring: {mask(formatCurrency(metrics.netRecurringMonthly))}/mo
+                </span>
+              </div>
+            )}
           </div>
         </div>
       )}
