@@ -14,6 +14,9 @@ import {
   Plus,
   MessageSquare,
   ArrowUpRight,
+  Pencil,
+  Check,
+  X,
 } from 'lucide-react';
 import {
   computeHouseholdPaystubSummary,
@@ -286,6 +289,10 @@ export default function AdvisorTab({
   const [loadingThreads, setLoadingThreads] = useState(true);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [renamingThreadId, setRenamingThreadId] = useState(null);
+  const [renamingSource, setRenamingSource] = useState(null); // 'history' | 'toolbar'
+  const [renameDraft, setRenameDraft] = useState('');
+  const [renamingBusy, setRenamingBusy] = useState(false);
   const userStartedNewChatRef = useRef(false);
   const skipNextLoadForThreadRef = useRef(null);
 
@@ -601,6 +608,54 @@ export default function AdvisorTab({
     setHistoryOpen(false);
   };
 
+  const handleStartRename = (e, thread, source = 'history') => {
+    if (e) e.stopPropagation();
+    if (!thread) return;
+    setRenamingThreadId(thread.id);
+    setRenamingSource(source);
+    setRenameDraft(thread.title || '');
+  };
+
+  const handleCancelRename = (e) => {
+    if (e) e.stopPropagation();
+    setRenamingThreadId(null);
+    setRenamingSource(null);
+    setRenameDraft('');
+  };
+
+  const handleCommitRename = async (e, threadId) => {
+    if (e) e.stopPropagation();
+    const cleanTitle = renameDraft.replace(/\s+/g, ' ').trim().slice(0, 120);
+    if (!cleanTitle) {
+      handleCancelRename();
+      return;
+    }
+    setRenamingBusy(true);
+    setChatError('');
+    try {
+      const { error } = await supabase
+        .from('advisor_threads')
+        .update({ title: cleanTitle })
+        .eq('id', threadId);
+      if (error) throw error;
+      setThreads((prev) =>
+        prev.map((t) => (t.id === threadId ? { ...t, title: cleanTitle } : t))
+      );
+      setRenamingThreadId(null);
+      setRenamingSource(null);
+      setRenameDraft('');
+    } catch (err) {
+      setChatError(err?.message || 'Could not rename conversation.');
+    } finally {
+      setRenamingBusy(false);
+    }
+  };
+
+  const activeThread = useMemo(
+    () => threads.find((t) => t.id === activeThreadId) || null,
+    [threads, activeThreadId]
+  );
+
   const handleDeleteThread = async (e, thread) => {
     e.stopPropagation();
     if (!window.confirm(`Delete saved conversation "${thread.title}"?`)) return;
@@ -885,7 +940,58 @@ export default function AdvisorTab({
             </label>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {activeThread &&
+              (renamingThreadId === activeThread.id && renamingSource === 'toolbar' ? (
+                <div className="flex items-center gap-1">
+                  <input
+                    type="text"
+                    autoFocus
+                    maxLength={120}
+                    value={renameDraft}
+                    disabled={renamingBusy}
+                    onChange={(e) => setRenameDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleCommitRename(e, activeThread.id);
+                      } else if (e.key === 'Escape') {
+                        handleCancelRename(e);
+                      }
+                    }}
+                    className="w-44 sm:w-56 rounded-md border border-emerald-500/50 bg-zinc-950 px-2 py-1 text-[11px] text-zinc-100 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    disabled={renamingBusy}
+                    onClick={(e) => handleCommitRename(e, activeThread.id)}
+                    title="Save chat name"
+                    className="rounded-md bg-emerald-500/20 p-1 text-emerald-300 hover:bg-emerald-500/30"
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={renamingBusy}
+                    onClick={handleCancelRename}
+                    title="Cancel"
+                    className="rounded-md p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={(e) => handleStartRename(e, activeThread, 'toolbar')}
+                  title={`Rename current chat: "${activeThread.title}"`}
+                  className="inline-flex max-w-[200px] items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-zinc-300 hover:border-emerald-500/40 hover:text-emerald-200"
+                >
+                  <span className="truncate">{activeThread.title}</span>
+                  <Pencil className="h-2.5 w-2.5 shrink-0 opacity-75" />
+                </button>
+              ))}
+
             <button
               type="button"
               onClick={() => setHistoryOpen(!historyOpen)}
@@ -929,41 +1035,104 @@ export default function AdvisorTab({
               <div className="max-h-56 space-y-1.5 overflow-y-auto pr-1">
                 {threads.map((t) => {
                   const isActive = t.id === activeThreadId;
+                  const isRenaming = renamingThreadId === t.id && renamingSource === 'history';
                   return (
                     <div
                       key={t.id}
-                      onClick={() => handleSelectThread(t.id)}
+                      onClick={() => {
+                        if (!isRenaming) handleSelectThread(t.id);
+                      }}
                       className={`group flex cursor-pointer items-center justify-between gap-3 rounded-lg border px-3 py-2 transition ${
                         isActive
                           ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-100'
                           : 'border-zinc-800/80 bg-zinc-900/40 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900/80'
                       }`}
                     >
-                      <div className="flex min-w-0 items-center gap-2">
+                      <div className="flex min-w-0 flex-1 items-center gap-2">
                         <MessageSquare
                           className={`h-3.5 w-3.5 shrink-0 ${
                             isActive ? 'text-emerald-400' : 'text-zinc-500'
                           }`}
                         />
-                        <span className="truncate font-medium">{t.title}</span>
+                        {isRenaming ? (
+                          <input
+                            type="text"
+                            autoFocus
+                            maxLength={120}
+                            value={renameDraft}
+                            disabled={renamingBusy}
+                            onClick={(e) => e.stopPropagation()}
+                            onChange={(e) => setRenameDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault();
+                                handleCommitRename(e, t.id);
+                              } else if (e.key === 'Escape') {
+                                handleCancelRename(e);
+                              }
+                            }}
+                            className="w-full rounded border border-emerald-500/50 bg-zinc-950 px-2 py-0.5 text-xs text-zinc-100 focus:outline-none"
+                          />
+                        ) : (
+                          <span
+                            onDoubleClick={(e) => handleStartRename(e, t, 'history')}
+                            title="Double-click or click pencil to rename"
+                            className="truncate font-medium"
+                          >
+                            {t.title}
+                          </span>
+                        )}
                       </div>
-                      <div className="flex shrink-0 items-center gap-2.5">
-                        <span className="text-[10px] text-zinc-500">
-                          {new Date(t.updated_at || t.created_at).toLocaleString([], {
-                            month: 'short',
-                            day: 'numeric',
-                            hour: 'numeric',
-                            minute: '2-digit',
-                          })}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={(e) => handleDeleteThread(e, t)}
-                          title="Delete conversation"
-                          className="rounded p-1 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-400"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                      <div className="flex shrink-0 items-center gap-1.5">
+                        {isRenaming ? (
+                          <>
+                            <button
+                              type="button"
+                              disabled={renamingBusy}
+                              onClick={(e) => handleCommitRename(e, t.id)}
+                              title="Save name"
+                              className="rounded p-1 text-emerald-400 hover:bg-emerald-500/20"
+                            >
+                              <Check className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={renamingBusy}
+                              onClick={handleCancelRename}
+                              title="Cancel rename"
+                              className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                            >
+                              <X className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <span className="mr-1 text-[10px] text-zinc-500">
+                              {new Date(t.updated_at || t.created_at).toLocaleString([], {
+                                month: 'short',
+                                day: 'numeric',
+                                hour: 'numeric',
+                                minute: '2-digit',
+                              })}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={(e) => handleStartRename(e, t, 'history')}
+                              title="Rename conversation"
+                              className="rounded p-1 text-zinc-500 hover:bg-emerald-500/15 hover:text-emerald-300"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => handleDeleteThread(e, t)}
+                              title="Delete conversation"
+                              className="rounded p-1 text-zinc-500 hover:bg-rose-500/15 hover:text-rose-400"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   );
