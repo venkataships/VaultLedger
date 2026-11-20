@@ -27,6 +27,7 @@ import {
   computeHouseholdPaystubSummary,
   formatCurrency,
   formatPercent,
+  getEmployerRestrictedTickers,
   normalizePaystubDetails,
   sanitizePaystubDetailsForDb,
   toNumber,
@@ -1199,6 +1200,11 @@ export default function PaystubProfileCard({
     [profileForm, householdNames]
   );
 
+  const restrictedOptionsInfo = useMemo(
+    () => getEmployerRestrictedTickers(equityHoldings, accounts, profileForm),
+    [equityHoldings, accounts, profileForm]
+  );
+
   const autoSyncStats = useMemo(() => {
     const syncState = profileForm.paystub_details?.payroll_autosync || { rules: [] };
     const enabledCount = (syncState.rules || []).filter((r) => r.enabled).length;
@@ -1645,6 +1651,45 @@ export default function PaystubProfileCard({
                     onChange={(e) => setHouseholdField('financial_goals', e.target.value)}
                     className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-xs text-zinc-100"
                   />
+                </label>
+
+                <label className="block text-zinc-300 sm:col-span-2 lg:col-span-4">
+                  Employer-Restricted Tickers (No Options/Hedging)
+                  <input
+                    type="text"
+                    placeholder="Auto-detected from RSUs/ESPP — add extra tickers (e.g., GOOG, CSCO)"
+                    value={profileForm.paystub_details.tax_planning.restricted_option_tickers}
+                    onChange={(e) => {
+                      const val = e.target.value.toUpperCase();
+                      setIsDirty(true);
+                      setProfileForm((prev) => ({
+                        ...prev,
+                        paystub_details: {
+                          ...prev.paystub_details,
+                          tax_planning: {
+                            ...prev.paystub_details.tax_planning,
+                            restricted_option_tickers: val,
+                          },
+                        },
+                      }));
+                    }}
+                    className="mt-1 w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 font-mono text-xs text-zinc-100"
+                  />
+                  <div className="mt-1 text-[10px] text-zinc-500">
+                    {restrictedOptionsInfo.allRestrictedList.length > 0 ? (
+                      <span>
+                        Options/CC/CSP blocked for:{' '}
+                        <strong className="font-mono text-amber-300">
+                          {restrictedOptionsInfo.allRestrictedList.join(', ')}
+                        </strong>{' '}
+                        (insider trading guardrail)
+                      </span>
+                    ) : (
+                      <span>
+                        Any RSU/ESPP ticker is auto-excluded from Covered Call / CSP suggestions.
+                      </span>
+                    )}
+                  </div>
                 </label>
               </div>
 

@@ -978,7 +978,36 @@ function buildSanitizedFinancialContext(params: {
     return item;
   });
 
-  // Equity holdings + Covered Call (100+ shares) eligibility & CSP cash capacity
+  // Employer-restricted tickers (RSU/ESPP/custom) — insider trading guardrail (no options/hedging)
+  const restrictedOptionTickers = new Set<string>();
+  for (const h of holdings) {
+    if (!accMap.has(Number(h.account_id))) continue;
+    if (h.holding_type === 'rsu' || h.holding_type === 'espp') {
+      const sym = String(h.symbol || '').trim().toUpperCase();
+      if (sym) restrictedOptionTickers.add(sym);
+    }
+  }
+  const tpDetails = (taxProfile?.paystub_details || {}) as Record<string, unknown>;
+  const syncRules = (tpDetails?.payroll_autosync as Record<string, unknown> | undefined)?.rules;
+  if (Array.isArray(syncRules)) {
+    for (const r of syncRules as Array<Record<string, unknown>>) {
+      if (r && r.type === 'espp' && r.enabled !== false && r.symbol) {
+        const sym = String(r.symbol).trim().toUpperCase();
+        if (sym) restrictedOptionTickers.add(sym);
+      }
+    }
+  }
+  const rawCustomRestricted = String(
+    (tpDetails?.tax_planning as Record<string, unknown> | undefined)?.restricted_option_tickers || ''
+  );
+  for (const tok of rawCustomRestricted.split(/[\s,;]+/)) {
+    const sym = tok.trim().toUpperCase();
+    if (/^[A-Z0-9.\-^=]{1,14}$/.test(sym)) restrictedOptionTickers.add(sym);
+  }
+  if (restrictedOptionTickers.has('GOOG')) restrictedOptionTickers.add('GOOGL');
+  if (restrictedOptionTickers.has('GOOGL')) restrictedOptionTickers.add('GOOG');
+
+  // Equity holdings + Covered Call (100+ shares) eligibility & CSP cash capacity (excluding restricted tickers)
   const sanitizedHoldings = holdings
     .filter((h) => accMap.has(Number(h.account_id)))
     .map((h) => {
@@ -986,6 +1015,11 @@ function buildSanitizedFinancialContext(params: {
       const vested = num(h.shares);
       const unvested = num(h.unvested_shares);
       const price = num(h.last_price);
+      const symUpper = String(h.symbol || '').trim().toUpperCase();
+      const isRestricted =
+        h.holding_type === 'rsu' ||
+        h.holding_type === 'espp' ||
+        restrictedOptionTickers.has(symUpper);
       return {
         account: acc.name,
         owner: ownerLabel(acc.owner_profile),
@@ -998,7 +1032,8 @@ function buildSanitizedFinancialContext(params: {
         vested_value_usd: Number((vested * price).toFixed(2)),
         unvested_value_usd: Number((unvested * price).toFixed(2)),
         cost_basis_per_share: h.cost_basis_per_share !== null ? num(h.cost_basis_per_share) : undefined,
-        covered_call_contracts_eligible: Math.floor(vested / 100),
+        options_restricted_employer_stock: isRestricted ? true : undefined,
+        covered_call_contracts_eligible: isRestricted ? 0 : Math.floor(vested / 100),
       };
     });
 
@@ -1136,8 +1171,12 @@ function buildSanitizedFinancialContext(params: {
     options_income_readiness: {
       uninvested_brokerage_cash_usd: Number(brokerageCashForCsp.toFixed(2)),
       liquid_bank_cash_usd: Number((byCategory.bank || 0).toFixed(2)),
+      employer_restricted_no_options_tickers:
+        restrictedOptionTickers.size > 0
+          ? Array.from(restrictedOptionTickers).sort()
+          : undefined,
       covered_call_eligible_lots: sanitizedHoldings
-        .filter((h) => h.covered_call_contracts_eligible >= 1)
+        .filter((h) => !h.options_restricted_employer_stock && h.covered_call_contracts_eligible >= 1)
         .map((h) => ({
           account: h.account,
           symbol: h.symbol,
@@ -1289,7 +1328,7 @@ Deno.serve(async (req: Request) => {
       '2. Be concrete, quantitative, and structured: use clear Markdown headings, bullet points, exact dollar figures, percentages, and prioritized action steps.',
       '3. Tax & Paystub Optimization ("tax cheat codes"): Analyze 2026 IRS & OBBBA rules ($24,500 employee 401k Trad+Roth, $72,000 total 415(c) Mega Backdoor Roth, HSA $4,400 self / $8,750 family incl. employer seed, Healthcare FSA $3,400 / LPFSA rules, Dependent Care FSA $7,500 MFJ / $3,750 MFS, ESPP §423 $25,000 FMV limit & qualifying disposition, Social Security wage base $184,500, standard deduction $32,200 MFJ / $16,100 single, OBBBA 2026 SALT cap $40,400 phasing down 30% above $505,000 MAGI to $10,000 floor, Child Tax Credit $2,200 phasing out above $400,000 MFJ, $1,000 Section 530A newborn Trump Account seed via Form 4547). When populated, audit itemized deductions vs. W-4 Step 4(b) deductions, state withholding allowances (for NY IT-2104, remember NY Schedule A excludes NY state income tax and phases out itemized deductions at higher NY AGI, and NY 529 offers up to $10,000/yr MFJ NY deduction), 2025 prior-year Safe Harbor (110% if 2025 AGI > $150k MFJ, or 90% of current-year tax), capital loss carryforward strategy ($3,000 ordinary offset + unlimited tax-free capital gain shielding for post-vest RSUs, covered call assignments, or rebalancing), upcoming baby timing (Dec 31 vs. Jan 1 tax-year cutoff, 30-day QLE for Family HSA & DCFSA, two-plan-year delivery OOP max & NY PFL), and US/India cross-border reporting reminders (FBAR/Form 8938) when India assets exist.',
       '4. Debt & 0% Promos: Always flag upcoming 0% balance transfer expirations and compute exact monthly payoff cash needed vs. liquid cash runway, and compare mortgage/auto loan APRs against after-tax risk-free yield.',
-      '5. Covered Calls (CC) & Cash-Secured Puts (CSP): When asked about options income, ONLY reference eligible 100-share lots or actual available cash, and emphasize strict risk management (position sizing, avoiding earnings week, 20–30 delta OTM strikes, 30–45 DTE, assignment tax consequences on low-basis RSUs/stocks, and never risking emergency fund cash).',
+      '5. Covered Calls (CC) & Cash-Secured Puts (CSP): STRICT COMPLIANCE GUARDRAIL: NEVER recommend covered calls, cash-secured puts, collars, short sales, margin pledging, or any options/hedging trades on any ticker listed in options_income_readiness.employer_restricted_no_options_tickers (employer stock from RSU/ESPP grants across any household account), as corporate insider trading policies ban employee and household member derivatives on company stock. For restricted employer shares, only discuss outright sales/diversification during open trading windows and ESPP qualifying disposition timing. Otherwise, ONLY reference non-restricted eligible 100-share lots in covered_call_eligible_lots or actual available cash, and emphasize strict risk management (position sizing, avoiding earnings week, 20–30 delta OTM strikes, 30–45 DTE, assignment tax consequences on low-basis stock, and never risking emergency fund cash).',
       '6. Privacy & Safety: Never ask for SSN, home street address, full account numbers, or passwords. Include a brief one-line reminder on major tax/legal strategies to verify with a CPA when executing.',
       '',
       '=== LIVE HOUSEHOLD FINANCIAL SNAPSHOT (ANONYMIZED, RLS-VERIFIED) ===',

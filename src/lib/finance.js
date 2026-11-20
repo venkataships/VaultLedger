@@ -1016,6 +1016,8 @@ export function createDefaultTaxPlanning() {
     expected_leave_income_dip: '',
     expected_delivery_oop_buffer: '',
     life_event_notes: '',
+    // 6. Employer Compliance Guardrail (No Options/Hedging on Employer Stock)
+    restricted_option_tickers: '',
   };
 }
 
@@ -1069,6 +1071,7 @@ function normalizeTaxPlanning(raw) {
     expected_leave_income_dip: numStr(raw.expected_leave_income_dip),
     expected_delivery_oop_buffer: numStr(raw.expected_delivery_oop_buffer),
     life_event_notes: strVal(raw.life_event_notes, 1000),
+    restricted_option_tickers: strVal(raw.restricted_option_tickers, 200),
   };
 }
 
@@ -1145,6 +1148,7 @@ export function sanitizePaystubDetailsForDb(raw) {
     expected_leave_income_dip: Math.max(0, toNumber(tp.expected_leave_income_dip)),
     expected_delivery_oop_buffer: Math.max(0, toNumber(tp.expected_delivery_oop_buffer)),
     life_event_notes: tp.life_event_notes.trim().slice(0, 1000),
+    restricted_option_tickers: tp.restricted_option_tickers.trim().toUpperCase().slice(0, 200),
   };
 
   return {
@@ -2045,6 +2049,56 @@ export function summarizeExpensesList(items) {
     byCategoryGross,
     byCategoryCredits,
     categoriesSorted,
+  };
+}
+
+const OPTION_TICKER_RE = /^[A-Z0-9.\-^=]{1,14}$/;
+
+function expandEmployerShareClassTwins(tickerSet) {
+  if (tickerSet.has('GOOG')) tickerSet.add('GOOGL');
+  if (tickerSet.has('GOOGL')) tickerSet.add('GOOG');
+}
+
+export function getEmployerRestrictedTickers(holdings = [], accounts = [], taxProfile = null) {
+  const activeAccounts = (accounts || []).filter((a) => !a.is_archived);
+  const hasAccountsFilter = (accounts || []).length > 0;
+  const activeIds = new Set(activeAccounts.map((a) => Number(a.id)));
+
+  const autoSet = new Set();
+  for (const h of holdings || []) {
+    if (hasAccountsFilter && !activeIds.has(Number(h.account_id))) continue;
+    if (h.holding_type === 'rsu' || h.holding_type === 'espp') {
+      const sym = String(h.symbol || '').trim().toUpperCase();
+      if (OPTION_TICKER_RE.test(sym)) autoSet.add(sym);
+    }
+  }
+
+  const syncRules = taxProfile?.paystub_details?.payroll_autosync?.rules;
+  if (Array.isArray(syncRules)) {
+    for (const rule of syncRules) {
+      if (rule && rule.type === 'espp' && rule.enabled !== false && rule.symbol) {
+        const sym = String(rule.symbol).trim().toUpperCase();
+        if (OPTION_TICKER_RE.test(sym)) autoSet.add(sym);
+      }
+    }
+  }
+  expandEmployerShareClassTwins(autoSet);
+
+  const customSet = new Set();
+  const rawCustom = taxProfile?.paystub_details?.tax_planning?.restricted_option_tickers || '';
+  for (const token of String(rawCustom).split(/[\s,;]+/)) {
+    const sym = token.trim().toUpperCase();
+    if (sym && OPTION_TICKER_RE.test(sym)) customSet.add(sym);
+  }
+  expandEmployerShareClassTwins(customSet);
+
+  const restrictedSet = new Set([...autoSet, ...customSet]);
+
+  return {
+    restrictedSet,
+    autoDetectedList: Array.from(autoSet).sort(),
+    customList: Array.from(customSet).sort(),
+    allRestrictedList: Array.from(restrictedSet).sort(),
   };
 }
 

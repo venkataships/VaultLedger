@@ -21,6 +21,7 @@ import {
 import {
   computeHouseholdPaystubSummary,
   formatCurrency,
+  getEmployerRestrictedTickers,
   toNumber,
 } from '../lib/finance';
 
@@ -67,7 +68,7 @@ const QUICK_PROMPTS = [
   {
     title: 'Covered Calls & CSP Plan',
     prompt:
-      'Look at our stock positions with 100+ shares and our uninvested brokerage cash. Design a disciplined Covered Call and Cash-Secured Put income strategy with strict risk management (delta targets, 30-45 DTE, earnings avoidance, assignment tax impact, and max capital at risk).',
+      'Look at our non-restricted stock positions with 100+ shares and our uninvested brokerage cash, strictly excluding employer-restricted tickers (never trade options on current employer stock). Design a disciplined Covered Call and Cash-Secured Put income strategy with strict risk management (delta targets, 30-45 DTE, earnings avoidance, assignment tax impact, and max capital at risk).',
   },
   {
     title: 'RSU & Concentration Check',
@@ -436,17 +437,27 @@ export default function AdvisorTab({
     [taxProfile, householdNames]
   );
 
+  const restrictedInfo = useMemo(
+    () => getEmployerRestrictedTickers(equityHoldings, accounts, taxProfile),
+    [equityHoldings, accounts, taxProfile]
+  );
+
   const ccEligibleLots = useMemo(() => {
     const activeIds = new Set((accounts || []).filter((a) => !a.is_archived).map((a) => a.id));
     return (equityHoldings || [])
-      .filter((h) => activeIds.has(h.account_id) && toNumber(h.shares) >= 100)
+      .filter((h) => {
+        if (!activeIds.has(h.account_id) || toNumber(h.shares) < 100) return false;
+        if (h.holding_type === 'rsu' || h.holding_type === 'espp') return false;
+        const sym = String(h.symbol || '').trim().toUpperCase();
+        return !restrictedInfo.restrictedSet.has(sym);
+      })
       .map((h) => ({
         id: h.id,
         symbol: h.symbol,
         shares: toNumber(h.shares),
         contracts: Math.floor(toNumber(h.shares) / 100),
       }));
-  }, [accounts, equityHoldings]);
+  }, [accounts, equityHoldings, restrictedInfo]);
 
   const selectedProvider = selectedModel.startsWith('claude-') ? 'anthropic' : 'gemini';
   const isSelectedConfigured = Boolean(advisorStatus.providers?.[selectedProvider]);
@@ -888,6 +899,15 @@ export default function AdvisorTab({
           {ccEligibleLots.length > 0 && (
             <span className="rounded-full border border-sky-500/30 bg-sky-500/10 px-2.5 py-0.5 font-mono text-[10px] text-sky-300">
               CC-Eligible: {ccEligibleLots.map((l) => `${l.symbol} (${l.contracts}x)`).join(', ')}
+            </span>
+          )}
+
+          {restrictedInfo.allRestrictedList.length > 0 && (
+            <span
+              title="Employer-restricted tickers auto-blocked from Covered Call / CSP options advice"
+              className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2.5 py-0.5 font-mono text-[10px] text-amber-300"
+            >
+              No-Options Guard: {restrictedInfo.allRestrictedList.join(', ')}
             </span>
           )}
         </div>

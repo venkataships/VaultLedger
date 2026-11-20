@@ -25,6 +25,7 @@ import {
   computeHouseholdPaystubSummary,
   formatCurrency,
   formatPercent,
+  getEmployerRestrictedTickers,
   getRealAssetType,
   todayIsoDate,
   toNumber,
@@ -143,9 +144,18 @@ export function buildActionableInsights({
 
   const totalPromoBalance = activePromos.reduce((s, p) => s + p.bal, 0);
 
-  // Covered-call eligible lots (100+ vested shares)
+  // Employer-restricted tickers (RSU/ESPP/custom) — insider trading guardrail
+  const restrictedInfo = getEmployerRestrictedTickers(equityHoldings, accounts, taxProfile);
+
+  // Covered-call eligible lots (100+ vested shares, strictly excluding restricted/RSU/ESPP lots)
   const ccLots = (equityHoldings || [])
-    .filter((h) => activeAccountMap.has(Number(h.account_id)) && toNumber(h.shares) >= 100)
+    .filter((h) => {
+      if (!activeAccountMap.has(Number(h.account_id))) return false;
+      if (toNumber(h.shares) < 100) return false;
+      if (h.holding_type === 'rsu' || h.holding_type === 'espp') return false;
+      const sym = String(h.symbol || '').trim().toUpperCase();
+      return !restrictedInfo.restrictedSet.has(sym);
+    })
     .map((h) => {
       const acc = activeAccountMap.get(Number(h.account_id));
       const shares = toNumber(h.shares);
@@ -402,7 +412,9 @@ export function buildActionableInsights({
       steps: [
         'Diversify appreciated vested RSUs/ESPP lots or rebalance concentrated positions tax-free up to your carryforward balance.',
         ccLots.length > 0
-          ? `Covered Call synergy: You have ${ccLots.length} lot${ccLots.length === 1 ? '' : 's'} eligible for Covered Calls (${ccLots.map((l) => l.symbol).join(', ')}) — any short-term option premiums or assignment gains are shielded 100% tax-free by your carryforward.`
+          ? `Covered Call synergy: You have ${ccLots.length} non-restricted lot${ccLots.length === 1 ? '' : 's'} eligible for Covered Calls (${ccLots.map((l) => l.symbol).join(', ')}${restrictedInfo.allRestrictedList.length > 0 ? `, excluding employer-restricted ${restrictedInfo.allRestrictedList.join(', ')}` : ''}) — any short-term option premiums or assignment gains are shielded 100% tax-free by your carryforward.`
+          : restrictedInfo.allRestrictedList.length > 0
+          ? `Employer-stock guardrail active: ${restrictedInfo.allRestrictedList.join(', ')} are excluded from options trades — diversify qualifying lots outright during open windows to absorb gains tax-free.`
           : 'Avoid unnecessary tax-loss harvesting that only piles onto an already large carryforward — consider harvesting gains to step up cost basis (no wash-sale rule on gains!).',
       ],
       navAction: { label: 'View Holdings', tab: 'accounts', categoryFilter: 'investment' },
@@ -520,6 +532,11 @@ export function buildActionableInsights({
       summary: `Vested 100-share lots can generate conservative 20–25 delta OTM income (30–45 DTE, avoiding earnings weeks).${paySummary.capLosses.remainingCarryforwardTo2027 > 0 ? ' Bonus: your capital loss carryforward shields short-term premiums & assignment gains tax-free!' : ''}`,
       steps: [
         'Only sell calls at strike prices where you are genuinely happy diversifying the shares.',
+        ...(restrictedInfo.allRestrictedList.length > 0
+          ? [
+              `Compliance guardrail: employer tickers (${restrictedInfo.allRestrictedList.join(', ')}) are automatically excluded from Covered Call / CSP suggestions.`,
+            ]
+          : []),
       ],
       navAction: { label: 'Open Holdings', tab: 'accounts', categoryFilter: 'investment' },
       aiPrompt: `Design a conservative Covered Call plan for our eligible 100-share lots (${ccLots.map((l) => `${l.symbol}: ${l.shares} shares`).join(', ')}) factoring in earnings risk and our capital loss carryforward.`,
