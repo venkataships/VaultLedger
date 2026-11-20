@@ -17,6 +17,7 @@ import {
   Sparkles,
   Briefcase,
   CalendarClock,
+  Target,
 } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import { seedDemoVaultData } from './lib/demoSeed';
@@ -46,6 +47,9 @@ import AccountsTab from './components/AccountsTab';
 import ExpensesTab from './components/ExpensesTab';
 import AdvisorTab from './components/AdvisorTab';
 import PaystubProfileCard from './components/PaystubProfileCard';
+import ActionableInsightsDashboard, {
+  buildActionableInsights,
+} from './components/ActionableInsightsDashboard';
 import SecurityTab from './components/SecurityTab';
 
 function AuthenticatedVault({
@@ -169,6 +173,7 @@ function AuthenticatedVault({
   const [batchModalOpen, setBatchModalOpen] = useState(false);
   const [newAccountCategory, setNewAccountCategory] = useState(null);
   const [payTabInitialSubTab, setPayTabInitialSubTab] = useState(null);
+  const [advisorInitialPrompt, setAdvisorInitialPrompt] = useState('');
   const [postingTopBannerSync, setPostingTopBannerSync] = useState(false);
   const [topSyncBannerNotice, setTopSyncBannerNotice] = useState('');
   const [topSyncBannerError, setTopSyncBannerError] = useState('');
@@ -523,6 +528,25 @@ function AuthenticatedVault({
     setActiveTab('income');
   }, []);
 
+  const handleAskAdvisorWithPrompt = useCallback((promptText) => {
+    if (promptText) setAdvisorInitialPrompt(promptText);
+    setActiveTab('advisor');
+  }, []);
+
+  const insightsUrgentCount = useMemo(() => {
+    const res = buildActionableInsights({
+      accounts,
+      equityHoldings,
+      promos: creditCardPromos,
+      expenses,
+      recurringBills,
+      budgets,
+      taxProfile,
+      householdNames,
+    });
+    return res.urgentCount;
+  }, [accounts, equityHoldings, creditCardPromos, expenses, recurringBills, budgets, taxProfile, householdNames]);
+
   const handleQuickPostAllDuePayroll = useCallback(async () => {
     if (!pendingPayrollBatch.dueItems.length || !session?.user?.id) return;
     setPostingTopBannerSync(true);
@@ -602,6 +626,7 @@ function AuthenticatedVault({
 
   const navItems = [
     { key: 'overview', label: 'Overview', icon: LayoutDashboard },
+    { key: 'insights', label: 'Insights', icon: Target, badge: insightsUrgentCount },
     { key: 'accounts', label: 'Accounts', icon: Wallet },
     { key: 'income', label: 'Pay & Taxes', icon: Briefcase },
     { key: 'expenses', label: 'Expenses', icon: Receipt },
@@ -680,6 +705,11 @@ function AuthenticatedVault({
                   >
                     <Icon className={`h-3.5 w-3.5 ${active ? 'text-emerald-400' : ''}`} />
                     {item.label}
+                    {item.badge > 0 && (
+                      <span className="rounded-full bg-amber-400 px-1.5 py-0.2 font-mono text-[9px] font-bold text-zinc-950">
+                        {item.badge}
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -688,7 +718,7 @@ function AuthenticatedVault({
 
           <div className="flex flex-wrap items-center gap-2">
             {/* Household Scope Switcher */}
-            {activeTab !== 'security' && activeTab !== 'income' && (
+            {activeTab !== 'security' && activeTab !== 'income' && activeTab !== 'insights' && (
               <div className="flex items-center gap-1 rounded-lg border border-zinc-800 bg-zinc-950 p-0.5 text-[11px]">
                 <Users className="ml-1.5 mr-0.5 hidden h-3.5 w-3.5 text-zinc-500 sm:inline" />
                 {scopeOptions.map((opt) => (
@@ -959,6 +989,23 @@ function AuthenticatedVault({
               />
             )}
 
+            {activeTab === 'insights' && (
+              <ActionableInsightsDashboard
+                accounts={accounts}
+                equityHoldings={equityHoldings}
+                promos={creditCardPromos}
+                expenses={expenses}
+                recurringBills={recurringBills}
+                budgets={budgets}
+                taxProfile={taxProfile}
+                householdNames={householdNames}
+                privacyMode={privacyMode}
+                onNavigateTab={handleNavigateTab}
+                onOpenAutoSync={handleOpenAutoSyncReview}
+                onAskAdvisor={handleAskAdvisorWithPrompt}
+              />
+            )}
+
             {activeTab === 'accounts' && (
               <AccountsTab
                 supabase={supabase}
@@ -1024,6 +1071,8 @@ function AuthenticatedVault({
                 activeThreadId={activeAdvisorThreadId}
                 onChangeActiveThreadId={setActiveAdvisorThreadId}
                 onOpenPayTab={() => setActiveTab('income')}
+                initialPrompt={advisorInitialPrompt}
+                onConsumedInitialPrompt={() => setAdvisorInitialPrompt('')}
               />
             )}
 

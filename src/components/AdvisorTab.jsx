@@ -269,6 +269,8 @@ export default function AdvisorTab({
   activeThreadId,
   onChangeActiveThreadId,
   onOpenPayTab,
+  initialPrompt = '',
+  onConsumedInitialPrompt,
 }) {
   const [selectedModel, setSelectedModel] = useState('claude-haiku-5-5');
   const [includeNotes, setIncludeNotes] = useState(false);
@@ -292,6 +294,13 @@ export default function AdvisorTab({
   const [sending, setSending] = useState(false);
   const [chatError, setChatError] = useState('');
   const chatEndRef = useRef(null);
+
+  useEffect(() => {
+    if (initialPrompt) {
+      setDraftInput(initialPrompt);
+      if (onConsumedInitialPrompt) onConsumedInitialPrompt();
+    }
+  }, [initialPrompt, onConsumedInitialPrompt]);
 
   const checkAdvisorStatus = useCallback(async () => {
     setAdvisorStatus((prev) => ({ ...prev, checking: true, error: '' }));
