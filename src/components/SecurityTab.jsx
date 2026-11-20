@@ -12,6 +12,8 @@ import {
   Check,
   Fingerprint,
   Timer,
+  Sun,
+  Moon,
 } from 'lucide-react';
 import { todayIsoDate } from '../lib/finance';
 import {
@@ -38,6 +40,8 @@ export default function SecurityTab({
   householdNames,
   lockSettings,
   onUpdateLockSettings,
+  theme = 'dark',
+  onChangeTheme,
   onLockNow,
   onDataChanged,
 }) {
@@ -255,6 +259,52 @@ export default function SecurityTab({
 
   return (
     <div className="space-y-6">
+      {/* Appearance Preference (Dark / Light) */}
+      {onChangeTheme && (
+        <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-zinc-800/90 bg-zinc-950/80 p-5">
+          <div className="flex items-center gap-3">
+            {theme === 'dark' ? (
+              <Moon className="h-5 w-5 text-indigo-400" />
+            ) : (
+              <Sun className="h-5 w-5 text-amber-400" />
+            )}
+            <div>
+              <h2 className="text-sm font-semibold text-zinc-100">Appearance</h2>
+              <p className="text-xs text-zinc-500">
+                Switch between Dark and Light mode (saved locally in this browser).
+              </p>
+            </div>
+          </div>
+
+          <div className="inline-flex items-center gap-1 rounded-xl border border-zinc-800 bg-zinc-900/70 p-1 text-xs">
+            <button
+              type="button"
+              onClick={() => onChangeTheme('dark')}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-medium transition ${
+                theme === 'dark'
+                  ? 'bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-500/40'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <Moon className="h-3.5 w-3.5" />
+              Dark
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeTheme('light')}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 font-medium transition ${
+                theme === 'light'
+                  ? 'bg-emerald-500/20 text-emerald-200 ring-1 ring-emerald-500/40'
+                  : 'text-zinc-400 hover:text-zinc-200'
+              }`}
+            >
+              <Sun className="h-3.5 w-3.5" />
+              Light
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Live Security Posture Matrix */}
       <div className="rounded-xl border border-zinc-800/90 bg-zinc-950/80 p-6">
         <div className="mb-4 flex items-center gap-2.5">

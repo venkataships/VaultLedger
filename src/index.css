@@ -7,10 +7,19 @@
     color-scheme: dark;
   }
 
+  :root.light {
+    color-scheme: light;
+  }
+
   body {
     background-color: #09090b;
     color: #f4f4f5;
     font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  html.light body {
+    background-color: #f8fafc;
+    color: #09090b;
   }
 
   input[type="number"]::-webkit-inner-spin-button,
@@ -38,4 +47,320 @@
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #3f3f46;
+}
+
+/* ==========================================================================
+   LIGHT MODE THEME SYSTEM (Zero impact on default Dark Mode)
+   ========================================================================== */
+html.light ::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+html.light ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+html.light ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Canvas & Sticky Header */
+html.light .bg-\[\#09090b\] {
+  background-color: #f8fafc !important;
+}
+html.light .bg-\[\#09090b\]\/90 {
+  background-color: rgba(255, 255, 255, 0.92) !important;
+}
+
+/* Modal Backdrops */
+html.light .bg-black\/75 {
+  background-color: rgba(15, 23, 42, 0.45) !important;
+}
+
+/* Elevated Card Surfaces (zinc-950 -> crisp white) */
+html.light .bg-zinc-950,
+html.light .bg-zinc-950\/95,
+html.light .bg-zinc-950\/90,
+html.light .bg-zinc-950\/85,
+html.light .bg-zinc-950\/80,
+html.light .bg-zinc-950\/75,
+html.light .bg-zinc-950\/70,
+html.light .bg-zinc-950\/60,
+html.light .bg-zinc-950\/50 {
+  background-color: #ffffff !important;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+/* Secondary / Inset Panels (zinc-900 -> soft zinc-50/100) */
+html.light .bg-zinc-900,
+html.light .bg-zinc-900\/90,
+html.light .bg-zinc-900\/80,
+html.light .bg-zinc-900\/70 {
+  background-color: #f4f4f5 !important;
+}
+html.light .bg-zinc-900\/50,
+html.light .bg-zinc-900\/45,
+html.light .bg-zinc-900\/40,
+html.light .bg-zinc-900\/35,
+html.light .bg-zinc-900\/30,
+html.light .bg-zinc-900\/25 {
+  background-color: #f8fafc !important;
+}
+
+/* Active Pills & Progress Bar Tracks (zinc-800 -> zinc-200) */
+html.light .bg-zinc-800,
+html.light .bg-zinc-800\/90,
+html.light .bg-zinc-800\/80 {
+  background-color: #e4e4e7 !important;
+}
+html.light .bg-zinc-700 {
+  background-color: #d4d4d8 !important;
+}
+
+/* Crisp Form Controls in Light Mode */
+html.light input:not([type="checkbox"]):not([type="radio"]),
+html.light select,
+html.light textarea {
+  background-color: #ffffff !important;
+  color: #09090b !important;
+  border-color: #d4d4d8 !important;
+}
+html.light input:not([type="checkbox"]):not([type="radio"])::placeholder,
+html.light textarea::placeholder {
+  color: #94a3b8 !important;
+}
+html.light input[type="checkbox"],
+html.light input[type="radio"] {
+  accent-color: #059669;
+}
+
+/* Borders & Dividers */
+html.light .border-zinc-900 {
+  border-color: #e4e4e7 !important;
+}
+html.light .border-zinc-800,
+html.light .border-zinc-800\/90,
+html.light .border-zinc-800\/80,
+html.light .border-zinc-800\/70 {
+  border-color: #e2e8f0 !important;
+}
+html.light .border-zinc-700 {
+  border-color: #cbd5e1 !important;
+}
+html.light .border-zinc-600 {
+  border-color: #94a3b8 !important;
+}
+html.light .divide-zinc-900 > :not([hidden]) ~ :not([hidden]),
+html.light .divide-zinc-800\/80 > :not([hidden]) ~ :not([hidden]),
+html.light .divide-zinc-800\/70 > :not([hidden]) ~ :not([hidden]),
+html.light .divide-zinc-800\/60 > :not([hidden]) ~ :not([hidden]) {
+  border-color: #e2e8f0 !important;
+}
+
+/* Hover States in Light Mode */
+html.light .hover\:bg-zinc-900:hover,
+html.light .hover\:bg-zinc-900\/80:hover,
+html.light .hover\:bg-zinc-900\/60:hover {
+  background-color: #f1f5f9 !important;
+}
+html.light .hover\:bg-zinc-800:hover,
+html.light .hover\:bg-zinc-800\/80:hover {
+  background-color: #e2e8f0 !important;
+}
+html.light .hover\:text-zinc-100:hover,
+html.light .hover\:text-zinc-200:hover {
+  color: #09090b !important;
+}
+html.light .hover\:border-zinc-700:hover,
+html.light .hover\:border-zinc-600:hover,
+html.light .hover\:border-zinc-500:hover {
+  border-color: #94a3b8 !important;
+}
+
+/* Primary Typography (Zinc Scale Inverted for High Contrast) */
+html.light .text-white {
+  color: #09090b !important;
+}
+html.light .text-zinc-50,
+html.light .text-zinc-100 {
+  color: #09090b !important;
+}
+html.light .text-zinc-200 {
+  color: #18181b !important;
+}
+html.light .text-zinc-300 {
+  color: #3f3f46 !important;
+}
+html.light .text-zinc-400 {
+  color: #52525b !important;
+}
+html.light .text-zinc-500 {
+  color: #64748b !important;
+}
+html.light .text-zinc-600 {
+  color: #94a3b8 !important;
+}
+
+/* Preserve dark ink on solid bright CTA buttons (bg-emerald-500, bg-amber-400, bg-fuchsia-500) */
+html.light .bg-emerald-500,
+html.light .bg-emerald-400,
+html.light .bg-amber-400,
+html.light .bg-amber-300,
+html.light .bg-fuchsia-500,
+html.light .bg-fuchsia-400 {
+  color: #09090b !important;
+}
+
+/* Semantic Accent Text -> Rich WCAG-AA+ Shades on Light Backgrounds */
+html.light .text-emerald-100,
+html.light .text-emerald-200,
+html.light .text-emerald-300 {
+  color: #047857 !important;
+}
+html.light .text-emerald-400,
+html.light .text-emerald-500 {
+  color: #059669 !important;
+}
+
+html.light .text-amber-100,
+html.light .text-amber-100\/80,
+html.light .text-amber-200,
+html.light .text-amber-200\/90,
+html.light .text-amber-300,
+html.light .text-amber-300\/70 {
+  color: #92400e !important;
+}
+html.light .text-amber-400,
+html.light .text-amber-500 {
+  color: #b45309 !important;
+}
+
+html.light .text-rose-100,
+html.light .text-rose-200,
+html.light .text-rose-300 {
+  color: #be123c !important;
+}
+html.light .text-rose-400 {
+  color: #e11d48 !important;
+}
+
+html.light .text-sky-100,
+html.light .text-sky-200,
+html.light .text-sky-300 {
+  color: #0369a1 !important;
+}
+html.light .text-sky-400,
+html.light .text-sky-500 {
+  color: #0284c7 !important;
+}
+
+html.light .text-violet-200,
+html.light .text-violet-300 {
+  color: #6d28d9 !important;
+}
+html.light .text-violet-400,
+html.light .text-violet-500 {
+  color: #7c3aed !important;
+}
+
+html.light .text-fuchsia-200,
+html.light .text-fuchsia-300 {
+  color: #a21caf !important;
+}
+html.light .text-fuchsia-400,
+html.light .text-fuchsia-500 {
+  color: #c026d3 !important;
+}
+
+html.light .text-cyan-200,
+html.light .text-cyan-300 {
+  color: #0e7490 !important;
+}
+html.light .text-cyan-400 {
+  color: #0891b2 !important;
+}
+
+html.light .text-pink-200,
+html.light .text-pink-300 {
+  color: #be185d !important;
+}
+html.light .text-indigo-300 {
+  color: #4338ca !important;
+}
+
+/* Soft Tinted Accent Surfaces -> Clean Light Pastel Tints */
+html.light .bg-emerald-500\/5 {
+  background-color: #ecfdf5 !important;
+}
+html.light .bg-emerald-500\/10,
+html.light .bg-emerald-500\/15,
+html.light .bg-emerald-500\/20 {
+  background-color: #d1fae5 !important;
+}
+html.light .bg-amber-500\/5 {
+  background-color: #fffbeb !important;
+}
+html.light .bg-amber-500\/10,
+html.light .bg-amber-500\/15,
+html.light .bg-amber-500\/20 {
+  background-color: #fef3c7 !important;
+}
+html.light .bg-rose-500\/5 {
+  background-color: #fff1f2 !important;
+}
+html.light .bg-rose-500\/10,
+html.light .bg-rose-500\/15,
+html.light .bg-rose-500\/20 {
+  background-color: #ffe4e6 !important;
+}
+html.light .bg-sky-500\/5 {
+  background-color: #f0f9ff !important;
+}
+html.light .bg-sky-500\/10,
+html.light .bg-sky-500\/15,
+html.light .bg-sky-500\/20 {
+  background-color: #e0f2fe !important;
+}
+html.light .bg-violet-500\/5 {
+  background-color: #f5f3ff !important;
+}
+html.light .bg-violet-500\/10,
+html.light .bg-violet-500\/15,
+html.light .bg-violet-500\/20 {
+  background-color: #ede9fe !important;
+}
+html.light .bg-fuchsia-500\/5 {
+  background-color: #fdf4ff !important;
+}
+html.light .bg-fuchsia-500\/10,
+html.light .bg-fuchsia-500\/15,
+html.light .bg-fuchsia-500\/20 {
+  background-color: #fae8ff !important;
+}
+html.light .bg-cyan-500\/5 {
+  background-color: #ecfeff !important;
+}
+html.light .bg-cyan-500\/10,
+html.light .bg-cyan-500\/15,
+html.light .bg-cyan-500\/20 {
+  background-color: #cffafe !important;
+}
+html.light .bg-pink-500\/10 {
+  background-color: #fce7f3 !important;
+}
+
+/* Recharts Charts, Grids & Tooltips in Light Mode */
+html.light .recharts-cartesian-grid line {
+  stroke: #e2e8f0 !important;
+}
+html.light .recharts-cartesian-axis-tick-value,
+html.light .recharts-text {
+  fill: #475569 !important;
+}
+html.light .recharts-default-tooltip {
+  background-color: #ffffff !important;
+  border-color: #cbd5e1 !important;
+  color: #09090b !important;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12) !important;
+}
+html.light .recharts-tooltip-label {
+  color: #09090b !important;
 }

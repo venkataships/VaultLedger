@@ -18,6 +18,8 @@ import {
   Briefcase,
   CalendarClock,
   Target,
+  Sun,
+  Moon,
 } from 'lucide-react';
 import { supabase } from './lib/supabase';
 import { seedDemoVaultData } from './lib/demoSeed';
@@ -40,6 +42,7 @@ import {
   saveLockSettings,
   setPersistedScreenLocked,
 } from './lib/screenLock';
+import { applyTheme, loadTheme, saveTheme } from './lib/theme';
 import AuthVaultGate from './components/AuthVaultGate';
 import VaultLockScreen from './components/VaultLockScreen';
 import OverviewTab from './components/OverviewTab';
@@ -60,9 +63,23 @@ function AuthenticatedVault({
   refreshAuthStatus,
   onSignOut,
 }) {
-  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'accounts' | 'expenses' | 'security'
+  const [activeTab, setActiveTab] = useState('overview'); // 'overview' | 'insights' | 'accounts' | 'income' | 'expenses' | 'advisor' | 'security'
   const [accountCategoryFilter, setAccountCategoryFilter] = useState('all');
   const [privacyMode, setPrivacyMode] = useState(false);
+  const [theme, setTheme] = useState(() => loadTheme());
+
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+
+  const handleChangeTheme = useCallback((nextTheme) => {
+    const saved = saveTheme(nextTheme);
+    setTheme(saved);
+  }, []);
+
+  const handleToggleTheme = useCallback(() => {
+    setTheme((prev) => saveTheme(prev === 'dark' ? 'light' : 'dark'));
+  }, []);
 
   // Auto-Lock & Screen Lock state (persists across Cmd+R refresh)
   const [lockSettings, setLockSettings] = useState(() => loadLockSettings());
@@ -792,6 +809,20 @@ function AuthenticatedVault({
 
             <button
               type="button"
+              onClick={handleToggleTheme}
+              title={theme === 'dark' ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-400 transition hover:text-zinc-200"
+            >
+              {theme === 'dark' ? (
+                <Sun className="h-3.5 w-3.5 text-amber-400" />
+              ) : (
+                <Moon className="h-3.5 w-3.5 text-indigo-500" />
+              )}
+              <span className="hidden sm:inline">{theme === 'dark' ? 'Light' : 'Dark'}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => setPrivacyMode(!privacyMode)}
               title={privacyMode ? 'Show dollar amounts' : 'Mask dollar amounts'}
               className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition ${
@@ -1094,6 +1125,8 @@ function AuthenticatedVault({
                 householdNames={householdNames}
                 lockSettings={lockSettings}
                 onUpdateLockSettings={handleUpdateLockSettings}
+                theme={theme}
+                onChangeTheme={handleChangeTheme}
                 onLockNow={() => triggerScreenLock('Manually locked to test screen lock.')}
                 onFullSignOut={handleFullSignOut}
                 onDataChanged={() => loadAllData()}
