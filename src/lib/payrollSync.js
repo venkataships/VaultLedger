@@ -1,5 +1,5 @@
-export const DEFAULT_2027_401K_EMPLOYEE_CAP = 24500;
-export const DEFAULT_2027_401K_415C_CAP = 72000;
+export const DEFAULT_2027_401K_EMPLOYEE_CAP = 25500;
+export const DEFAULT_2027_401K_415C_CAP = 75000;
 export const DEFAULT_ESPP_FMV_CAP = 25000;
 
 const FREQ_PERIODS = {
@@ -512,12 +512,12 @@ export function resolveRulePerCheckAmounts(rule, taxProfile) {
 export function evaluateEsppPurchaseSchedule(rule, asOfDate = todayIsoDate()) {
   const asOf = parseIsoDate(asOfDate);
   const start = parseIsoDate(rule?.start_date);
-  if (!asOf || !start) return { duePurchaseDate: '', nextPurchaseDate: '' };
+  if (!asOf || !start) return { duePurchaseDate: '', duePurchaseDates: [], nextPurchaseDate: '' };
 
   const mmdds = (Array.isArray(rule.purchase_months_days) ? rule.purchase_months_days : ['06-30', '12-31'])
     .filter((s) => MM_DD_RE.test(s))
     .sort();
-  if (mmdds.length === 0) return { duePurchaseDate: '', nextPurchaseDate: '' };
+  if (mmdds.length === 0) return { duePurchaseDate: '', duePurchaseDates: [], nextPurchaseDate: '' };
 
   const allDates = [];
   for (let y = Math.min(start.y, asOf.y) - 1; y <= asOf.y + 2; y += 1) {
@@ -537,6 +537,7 @@ export function evaluateEsppPurchaseSchedule(rule, asOfDate = todayIsoDate()) {
 
   return {
     duePurchaseDate: dueDates.length > 0 ? dueDates[dueDates.length - 1] : '',
+    duePurchaseDates: dueDates,
     nextPurchaseDate: nextDates[0] || '',
   };
 }
@@ -690,6 +691,35 @@ export function computePendingPayrollBatch(autosyncRaw, taxProfile, accounts = [
       const projectedAccruedCash = Number((toNumber(rule.accrued_cash) + totalAmount).toFixed(2));
       const purchaseSched = evaluateEsppPurchaseSchedule(rule, asOfDate);
 
+      // Cycle-by-cycle ESPP purchase simulation (resets accrued pool to $0 on each purchase date)
+      const simulatedPurchaseEvents = [];
+      let simPool = Math.max(0, toNumber(rule.accrued_cash));
+      let checkCursor = 0;
+      for (const pDate of purchaseSched.duePurchaseDates || []) {
+        let cycleChecks = 0;
+        let cycleAdded = 0;
+        while (checkCursor < checks.length && checks[checkCursor].paydate <= pDate) {
+          simPool = Number((simPool + checks[checkCursor].espp).toFixed(2));
+          cycleAdded = Number((cycleAdded + checks[checkCursor].espp).toFixed(2));
+          cycleChecks += 1;
+          checkCursor += 1;
+        }
+        if (simPool > 0.01) {
+          simulatedPurchaseEvents.push({
+            purchaseDate: pDate,
+            cashToConvert: simPool,
+            paychecksInCycle: cycleChecks,
+            cycleAdded,
+          });
+          simPool = 0;
+        }
+      }
+      while (checkCursor < checks.length) {
+        simPool = Number((simPool + checks[checkCursor].espp).toFixed(2));
+        checkCursor += 1;
+      }
+      const endingAccruedCash = Number(simPool.toFixed(2));
+
       if (duePaydates.length > 0 && acc && totalAmount > 0) {
         totalDuePaydays += duePaydates.length;
         totalDueDollars += totalAmount;
@@ -704,6 +734,8 @@ export function computePendingPayrollBatch(autosyncRaw, taxProfile, accounts = [
           nextYtdYear: runYear,
           nextYtdEspp: runYtdEspp,
           projectedAccruedCash,
+          simulatedPurchaseEvents,
+          endingAccruedCash,
           hitCap,
         });
       } else if (acc) {
@@ -725,6 +757,8 @@ export function computePendingPayrollBatch(autosyncRaw, taxProfile, accounts = [
           account: acc,
           purchaseDate: purchaseSched.duePurchaseDate,
           availableCash: projectedAccruedCash,
+          simulatedPurchaseEvents,
+          endingAccruedCash,
           needsPaycheckSyncFirst: duePaydates.length > 0 && totalAmount > 0,
         });
       }
